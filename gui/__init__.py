@@ -1,0 +1,1 @@
+# Guitar Extractor GUI package
