@@ -1,0 +1,14 @@
+# Audio exports
+Exports/
+
+# Models
+*.onnx
+resources/
+
+# Logs
+*.log
+*.reapeaks
+
+# Python
+__pycache__/
+*.pyc
