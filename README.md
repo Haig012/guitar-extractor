@@ -13,7 +13,6 @@ A Windows desktop application that downloads audio from YouTube, runs Demucs ste
 - 🌍 **English / Hebrew** UI with true RTL layout switching
 - 🚀 **GPU acceleration** auto-detected (CUDA)
 - 🎛️ **5 output formats**: WAV, MP3, M4A, WebM, Opus
-- 📋 **Recent files** history (last 7 tracks)
 - 🛠️ **Dependency checker** with auto-install
 - 📄 **Full logs** saved to export folder
 - 🖥️ **Dark modern UI** with smooth design
@@ -31,8 +30,7 @@ guitar_extractor/
 ├── gui/
 │   ├── main_window.py         ← Main window assembly
 │   ├── card_performance.py    ← Card 1: Input & controls
-│   ├── card_recent.py         ← Card 2: Recent files
-│   ├── card_debug.py          ← Card 3: Logs & progress
+│   ├── card_debug.py          ← Card 2: Logs & progress
 │   ├── dep_dialog.py          ← Dependency check dialog
 │   └── styles.py              ← Dark theme stylesheet
 ├── pipeline/
