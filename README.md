@@ -1,6 +1,8 @@
 # 🎸 Guitar Extractor
 **Made by Hai Guriel**
 
+☕ [Support me on Ko-fi](https://ko-fi.com/haiguriel)
+
 A Windows desktop application that downloads audio from YouTube, runs Demucs stem separation, and exports the **`other`** stem plus a mix of **drums + bass + vocals** (everything except `other`).
 
 ---
@@ -114,6 +116,16 @@ The full UI mirrors for true RTL layout in Hebrew.
 | Demucs crashes | Ensure at least 8GB RAM free; try CPU mode |
 | Slow processing | Normal on CPU — GPU (NVIDIA CUDA) is 5-10x faster |
 | DeepFilterNet skipped | Install with `pip install deepfilternet`; non-fatal |
+
+---
+
+---
+
+## ☕ Support
+
+If you find this tool useful, consider supporting its development:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/haiguriel)
 
 ---
 
