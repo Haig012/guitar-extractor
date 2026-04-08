@@ -27,10 +27,28 @@ def _normalize_overflow(parts: list[float]) -> list[int]:
 
 
 def _parse_clock(s: str) -> float:
-    """Parse H:M:S, M:S, or plain seconds."""
+    """Parse H:M:S, M:S, or plain seconds.
+    Also accepts:
+    - 300 → 3:00
+    - 1233 → 12:33
+    - 458 → 4:58
+    - 0908 → 9:08
+    """
     s = s.strip().lower()
     if not s:
         raise ValueError("empty time")
+    # Numeric shorthand (no colons)
+    if re.match(r"^\d+$", s):
+        val = int(s)
+        if val == 0:
+            return 0.0
+        if val < 100:
+            # 0-99: plain seconds
+            return float(val)
+        # 3+ digits: treat as MMSS format
+        seconds = val % 100
+        minutes = val // 100
+        return float(minutes * 60 + seconds)
     if re.match(r"^\d+(\.\d+)?$", s):
         return float(s)
     parts = s.split(":")

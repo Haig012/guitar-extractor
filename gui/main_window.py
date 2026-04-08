@@ -28,6 +28,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._settings = settings_mgr.load_settings()
         self._lang = self._settings.get("language", "en")
+        # Force English as default first run
+        if "language" not in self._settings:
+            self._settings["language"] = "en"
+            self._lang = "en"
+            settings_mgr.save_settings(self._settings)
         self._worker: PipelineWorker | None = None
         self._last_config: dict | None = None
 
@@ -80,9 +85,6 @@ class MainWindow(QMainWindow):
         self.perfCard.repeat_last.connect(self._on_repeat_last)
         scroll_layout.addWidget(self.perfCard)
 
-        # ── Card 2: Recent Files ──────────────────────────────────────────
-        self.recentCard = RecentFilesCard(self._lang)
-        scroll_layout.addWidget(self.recentCard)
 
         # ── Card 3: Debug ─────────────────────────────────────────────────
         self.debugCard = DebugCard(self._lang)
@@ -163,7 +165,6 @@ class MainWindow(QMainWindow):
         self.madeByLabel.setText(self._t("made_by"))
         self.langBtn.setText("🇮🇱 Hebrew" if self._lang == "en" else "🇬🇧 English")
         self.perfCard.retranslate(self._lang)
-        self.recentCard.retranslate(self._lang)
         self.debugCard.retranslate(self._lang)
 
     def _apply_direction(self):
@@ -198,7 +199,13 @@ class MainWindow(QMainWindow):
         self._settings["last_input_type"] = config.get("input_type", "youtube")
         self._settings["export_folder"] = folder
         self._settings["format"] = config.get("format", "wav")
-        self._settings["last_time_range"] = self.perfCard.timeRangeEdit.text().strip()
+        # No single timeRangeEdit anymore - using separate start/end
+        start = self.perfCard.timeStartEdit.text().strip()
+        end = self.perfCard.timeEndEdit.text().strip()
+        if start or end:
+            self._settings["last_time_range"] = f"{start} - {end}"
+        else:
+            self._settings["last_time_range"] = ""
         self._settings["remove_crowd"] = bool(config.get("remove_crowd", False))
         self._settings["remove_reverb"] = bool(config.get("remove_reverb", False))
         self._settings["crowd_mode"] = config.get("crowd_mode", "remove")
@@ -233,15 +240,18 @@ class MainWindow(QMainWindow):
         self.debugCard.append_log(f"🎸 Primary output: {output_path}")
         self.debugCard.set_status(self._t("step_done"))
         self.debugCard.set_eta(self._t("eta_unknown").replace("Unknown", "Done!"))
-        self.recentCard.add_file(output_path)
         self._on_pipeline_done()
 
         folder = os.path.dirname(output_path)
         other_name = os.path.basename(output_path)
-        if output_path.lower().endswith("_other.wav"):
+        
+        # For solo mode output - only one file exists
+        if output_path.lower().endswith("_solo_mix.wav"):
+            mix_name = ""
+        elif output_path.lower().endswith("_other.wav"):
             mix_name = os.path.basename(output_path)[:-len("_other.wav")] + "_everything_but_other.wav"
         else:
-            mix_name = other_name
+            mix_name = ""
 
         # Auto-open output folder
         if self._settings.get("auto_open_output", True):

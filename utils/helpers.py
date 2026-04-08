@@ -180,3 +180,188 @@ def clean_temp_files(paths: list):
                 shutil.rmtree(p, ignore_errors=True)
         except Exception:
             pass
+
+
+def split_audio_segments(input_wav: str, segments: list, tmp_dir: str) -> list:
+    """
+    Split audio file into multiple segments.
+    Returns list of segment paths with type indicator.
+    """
+    import librosa
+    import soundfile as sf
+    import numpy as np
+    
+    audio, sr = librosa.load(input_wav, sr=44100, mono=False)
+    duration = audio.shape[1] / sr
+    
+    # Add margin for crossfades (300ms each side) so transitions don't cut off
+    CROSSFADE_MARGIN = 0.300
+    
+    # Sort segments by start time
+    sorted_segments = sorted(segments, key=lambda x: x[0])
+    
+    output_segments = []
+    last_end = 0.0
+    
+    # Add original segments and solo segments
+    for start, end in sorted_segments:
+        if start > last_end:
+            # Add original segment WITH extra margin at end for crossfade
+            orig_end = min(start + CROSSFADE_MARGIN, duration)
+            orig_samples = audio[:, int(last_end * sr):int(orig_end * sr)]
+            orig_path = os.path.join(tmp_dir, f"orig_{last_end:.2f}_{start:.2f}.wav")
+            sf.write(orig_path, orig_samples.T, sr)
+            output_segments.append({
+                "type": "original",
+                "path": orig_path,
+                "start": last_end,
+                "end": start,
+                "actual_end": orig_end
+            })
+        
+        # Add solo segment WITH extra margin on BOTH sides for crossfade
+        solo_start = max(0.0, start - CROSSFADE_MARGIN)
+        solo_end = min(end + CROSSFADE_MARGIN, duration)
+        solo_samples = audio[:, int(solo_start * sr):int(solo_end * sr)]
+        solo_path = os.path.join(tmp_dir, f"solo_{start:.2f}_{end:.2f}.wav")
+        sf.write(solo_path, solo_samples.T, sr)
+        output_segments.append({
+            "type": "solo",
+            "path": solo_path,
+            "start": start,
+            "end": end,
+            "actual_start": solo_start,
+            "actual_end": solo_end
+        })
+        
+        last_end = end
+    
+    # Add final original segment if needed
+    if last_end < duration:
+        # Add margin at start for crossfade
+        orig_start = max(0.0, last_end - CROSSFADE_MARGIN)
+        orig_samples = audio[:, int(orig_start * sr):]
+        orig_path = os.path.join(tmp_dir, f"orig_{last_end:.2f}_end.wav")
+        sf.write(orig_path, orig_samples.T, sr)
+        output_segments.append({
+            "type": "original",
+            "path": orig_path,
+            "start": last_end,
+            "end": duration,
+            "actual_start": orig_start
+        })
+    
+    return output_segments
+
+
+def apply_gain_match(source_wav: str, target_wav: str, output_wav: str = None) -> str:
+    """Match RMS level of source to target."""
+    import librosa
+    import soundfile as sf
+    import numpy as np
+    
+    if output_wav is None:
+        output_wav = source_wav
+    
+    source, sr = librosa.load(source_wav, sr=44100, mono=False)
+    target, _ = librosa.load(target_wav, sr=44100, mono=False)
+    
+    # Calculate RMS
+    source_rms = np.sqrt(np.mean(source ** 2))
+    target_rms = np.sqrt(np.mean(target ** 2))
+    
+    # Apply gain
+    if source_rms > 0:
+        gain = target_rms / source_rms
+        source = source * gain
+    
+    sf.write(output_wav, source.T, sr)
+    return output_wav
+
+
+def smart_blend(segments: list, output_wav: str, fade_ms: int = 300) -> str:
+    """
+    Merge segments with smooth equal power crossfade transitions.
+    Crossfade is perfectly centered on the user's selected boundary point.
+    Uses cosine square root crossfade for constant equal loudness.
+    """
+    import soundfile as sf
+    import numpy as np
+    
+    sr = 44100
+    fade_samples = int(fade_ms * sr / 1000)
+    half_fade = fade_samples // 2
+    
+    # Calculate total length from logical segment boundaries
+    total_samples = int(segments[-1]["end"] * sr)
+    
+    full_audio = np.zeros((2, total_samples), dtype=np.float32)
+    
+    for seg in segments:
+        audio, _ = sf.read(seg["path"])
+        audio = audio.T
+        
+        # Calculate exact boundary position - this is the exact time user selected
+        boundary_samples = int(seg["start"] * sr)
+        
+        # Small gentle 80ms pre-lead so solo starts slightly before boundary
+        PRE_OFFSET = int(0.080 * sr)
+        boundary_samples = max(boundary_samples - PRE_OFFSET, 0)
+        
+        # Crossfade starts HALF before the boundary, ends HALF after the boundary
+        crossfade_start = boundary_samples - half_fade
+        
+        # Place segment so crossfade perfectly centers on boundary
+        if "actual_start" in seg:
+            offset = int((seg["start"] - seg["actual_start"]) * sr)
+            pos_samples = crossfade_start - offset
+        else:
+            pos_samples = crossfade_start
+        
+        seg_len = audio.shape[1]
+        # Clamp position to valid array bounds to prevent negative indices
+        pos_samples = max(pos_samples, 0)
+        end_pos = min(pos_samples + seg_len, total_samples)
+        
+        # Only apply crossfade if not first segment
+        if fade_samples > 0 and pos_samples > 0:
+            # Clamp crossfade window to valid array bounds
+            cf_start = max(crossfade_start, 0)
+            cf_end = min(crossfade_start + fade_samples, total_samples)
+            actual_fade = cf_end - cf_start
+            
+            if actual_fade > 0:
+                # Optimized raised cosine crossfade - perfectly smooth constant volume
+                t = np.linspace(0, 1, actual_fade)
+                fade_in = 0.5 - 0.5 * np.cos(np.pi * t)
+                fade_out = 1.0 - fade_in
+                
+                # Fade in the NEW segment
+                audio[:, :actual_fade] *= fade_in
+                
+                # Fade out the EXISTING audio over exact crossfade window
+                full_audio[:, cf_start:cf_end] *= fade_out
+                
+                # Overlap add at the exact crossfade position
+                full_audio[:, cf_start:cf_end] += audio[:, :actual_fade]
+            
+            # Write remaining audio after crossfade
+            remaining_start = max(crossfade_start + fade_samples, 0)
+            if remaining_start < end_pos:
+                src_offset = max(fade_samples - max(0, crossfade_start), 0)
+                dst_len = end_pos - remaining_start
+                full_audio[:, remaining_start:end_pos] = audio[:, src_offset:src_offset + dst_len]
+        else:
+            # First segment: write directly
+            write_len = end_pos - pos_samples
+            if write_len > 0:
+                full_audio[:, pos_samples:end_pos] = audio[:, :write_len]
+    
+    # Normalize final audio to -1dB peak
+    peak = np.max(np.abs(full_audio))
+    if peak > 0:
+        max_peak = 10 ** (-1 / 20)  # -1 dB
+        full_audio = full_audio * max_peak / peak
+    
+    sf.write(output_wav, full_audio.T, sr)
+    return output_wav

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import PySide6.QtCore
 
-from utils.helpers import sanitize_cli_filename, detect_gpu, ensure_dir, clean_temp_files
+from utils.helpers import sanitize_cli_filename, detect_gpu, ensure_dir, clean_temp_files, split_audio_segments, apply_gain_match, smart_blend
 
 CROWD_MODEL_PATH = r"C:\Users\haig0\AppData\Local\Programs\Ultimate Vocal Remover\models\MDX_Net_Models\UVR-MDX-NET_Crowd_HQ_1.onnx"
 REVERB_MODEL_PATH = r"C:\Users\haig0\AppData\Local\Programs\Ultimate Vocal Remover\models\VR_Models\UVR-DeEcho-DeReverb.pth"
@@ -93,8 +93,8 @@ class PipelineWorker(PySide6.QtCore.QThread):
     Runs the extraction pipeline:
     1. Download or prepare audio (yt-dlp / copy file)
     2. Convert to WAV if needed (ffmpeg)
-    3. Full stem separation (Demucs htdemucs: drums, bass, vocals, other)
-    4. Export ``other`` stem and a mix of drums + bass + vocals (everything but other)
+    3. Full stem separation (Demucs htdemucs_6s: drums, bass, vocals, other, piano, guitar)
+    4. Export ``guitar`` stem and a mix of everything but guitar
     """
 
     # Signals
@@ -186,101 +186,202 @@ class PipelineWorker(PySide6.QtCore.QThread):
                     wav_path = segment_path
                     temp_files.append(wav_path)
 
-            # ─── Step 3: Demucs Pass 1 - Full stem separation ────────────
-            self._emit_step(3, "Separating stems (Pass 1)...")
-            self.eta_update.emit("~5-15 min depending on file length")
-            demucs1_out = os.path.join(tmp_dir, "demucs1")
-            ensure_dir(demucs1_out)
-            self._run_demucs(wav_path, demucs1_out, use_gpu)
+            # ─── SOLO TIME PROCESSING MODE ───────────────────────────────────
+            if cfg.get("solo_time_enabled", False) and len(cfg.get("solo_time_segments", [])) > 0:
+                self.log.emit("🎸 SOLO TIME MODE ENABLED")
+                self._emit_step(3, "Processing full track with Demucs...")
+                
+                global_start = 0.0
+                if time_range is not None:
+                    global_start = time_range[0]
+                
+                solo_segments = cfg["solo_time_segments"]
+                
+                # Get actual audio duration for the trimmed file
+                import librosa
+                import numpy as np
+                import soundfile as sf
+                from utils.helpers_mask import create_fade_mask, apply_solo_mask
+                
+                duration = librosa.get_duration(path=wav_path)
+                sr = 44100
+                
+                # Convert absolute times (original audio) to relative times (within trimmed segment)
+                relative_segments = []
+                for start, end in solo_segments:
+                    rel_start = start - global_start
+                    rel_end = end - global_start
+                    if rel_end > 0 and rel_start < duration:
+                        rel_start = max(0.0, rel_start)
+                        rel_end = min(duration, rel_end)
+                        if rel_end > rel_start:
+                            relative_segments.append( (rel_start, rel_end) )
+                
+                self.log.emit(f"Converted {len(solo_segments)} absolute solo segments to {len(relative_segments)} relative segments after trimming")
 
-            other_stem = self._find_stem(demucs1_out, "other")
-            if not other_stem:
-                self.error.emit(
-                    "Demucs did not produce an 'other' stem.",
-                    "Ensure demucs is installed correctly: pip install demucs"
-                )
-                return
+                # ✅ NEW CORRECT APPROACH: FULL TRACK PROCESSING ONCE
+                demucs_full = os.path.join(tmp_dir, "demucs_full")
+                ensure_dir(demucs_full)
+                self._run_demucs(wav_path, demucs_full, use_gpu)
+                
+                # Load all 6 stems
+                guitar_stem = self._find_stem(demucs_full, "guitar")
+                other_stem = self._find_stem(demucs_full, "other")
+                drums_stem = self._find_stem(demucs_full, "drums")
+                bass_stem = self._find_stem(demucs_full, "bass")
+                vocals_stem = self._find_stem(demucs_full, "vocals")
+                piano_stem = self._find_stem(demucs_full, "piano")
+                
+                if not all([guitar_stem, other_stem, drums_stem, bass_stem, vocals_stem, piano_stem]):
+                    self.error.emit("Demucs failed to produce all 6 stems", "Check Demucs installation")
+                    return
 
-            drums_stem = self._find_stem(demucs1_out, "drums")
-            bass_stem = self._find_stem(demucs1_out, "bass")
-            vocals_stem = self._find_stem(demucs1_out, "vocals")
-            missing = [n for n, p in (("drums", drums_stem), ("bass", bass_stem), ("vocals", vocals_stem)) if not p]
-            if missing:
-                self.error.emit(
-                    f"Demucs did not produce stem(s): {', '.join(missing)}.",
-                    "Ensure demucs htdemucs completed successfully (check disk space and logs).",
-                )
-                return
+                temp_files.append(demucs_full)
+                self.progress.emit(60)
+                
+                # Load stems as numpy arrays
+                self._emit_step(4, "Applying Solo Time masking...")
+                
+                guitar, _ = librosa.load(guitar_stem, sr=sr, mono=False)
+                drums, _ = librosa.load(drums_stem, sr=sr, mono=False)
+                bass, _ = librosa.load(bass_stem, sr=sr, mono=False)
+                vocals, _ = librosa.load(vocals_stem, sr=sr, mono=False)
+                piano, _ = librosa.load(piano_stem, sr=sr, mono=False)
+                other, _ = librosa.load(other_stem, sr=sr, mono=False)
+                
+                # Reconstruct base mix without guitar
+                base_mix = drums + bass + vocals + piano + other
+                
+                # Optional cleaning: run UVR only on guitar stem
+                if cfg.get("remove_crowd", False) and os.path.exists(CROWD_MODEL_PATH):
+                    self.log.emit("Running Crowd Removal on guitar stem...")
+                    temp_guitar = os.path.join(tmp_dir, "guitar_temp.wav")
+                    sf.write(temp_guitar, guitar.T, sr)
+                    cleaned = run_onnx_model(temp_guitar, CROWD_MODEL_PATH, temp_guitar + "_cleaned.wav")
+                    guitar, _ = librosa.load(cleaned, sr=sr, mono=False)
+                    temp_files.extend([temp_guitar, cleaned])
+                
+                # Create time mask
+                total_samples = base_mix.shape[1]
+                mask = create_fade_mask(total_samples, relative_segments, sr=sr, fade_ms=150)
+                
+                # Apply masking blend
+                output = apply_solo_mask(base_mix, guitar, mask)
+                
+                # Normalize final output to -1dB
+                peak = np.max(np.abs(output))
+                if peak > 0:
+                    max_peak = 10 ** (-1 / 20)
+                    output = output * max_peak / peak
+                
+                # Save final result
+                final_output = os.path.join(final_dir, f"{song_name}_solo_mix.wav")
+                sf.write(final_output, output.T, sr)
+                
+                self.log.emit(f"✅ Final track saved with Solo Time: {final_output}")
+                final_path = final_output
+                self.progress.emit(90)
+                
+            else:
+                # ─── NORMAL MODE: Full stem separation ────────────────────
+                self._emit_step(3, "Separating stems with htdemucs_6s...")
+                self.eta_update.emit("~5-15 min depending on file length")
+                demucs_out = os.path.join(tmp_dir, "demucs")
+                ensure_dir(demucs_out)
+                self._run_demucs(wav_path, demucs_out, use_gpu)
 
-            temp_files.append(demucs1_out)
-            self.progress.emit(60)
+                guitar_stem = self._find_stem(demucs_out, "guitar")
+                if not guitar_stem:
+                    self.error.emit(
+                        "Demucs did not produce 'guitar' stem.",
+                        "Ensure demucs is installed correctly: pip install demucs"
+                    )
+                    return
 
-            if self._cancelled:
-                return
+                drums_stem = self._find_stem(demucs_out, "drums")
+                bass_stem = self._find_stem(demucs_out, "bass")
+                vocals_stem = self._find_stem(demucs_out, "vocals")
+                piano_stem = self._find_stem(demucs_out, "piano")
+                other_stem = self._find_stem(demucs_out, "other")
+                
+                missing = [n for n, p in (("drums", drums_stem), ("bass", bass_stem), ("vocals", vocals_stem), ("piano", piano_stem), ("other", other_stem)) if not p]
+                if missing:
+                    self.error.emit(
+                        f"Demucs did not produce stem(s): {', '.join(missing)}.",
+                        "Ensure demucs htdemucs_6s completed successfully (check disk space and logs).",
+                    )
+                    return
 
-            # ─── Step 4: Export other + mix everything-but-other ────────
-            self._emit_step(4, "Exporting stems...")
-            other_name = f"{song_name}_other.wav"
-            final_path = os.path.join(final_dir, other_name)
-            shutil.copy2(other_stem, final_path)
-            self.log.emit(f"✅ Saved other stem: {final_path}")
+                temp_files.append(demucs_out)
+                self.progress.emit(60)
 
-            # Optional ONNX post-processing on top of `other.wav`.
-            current_file = final_path
-            if cfg.get("remove_crowd", False):
-                self.log.emit("Running Crowd Removal...")
-                if os.path.exists(CROWD_MODEL_PATH):
-                    try:
-                        self.log.emit("Crowd model loaded")
-                        no_crowd_path = os.path.join(tmp_dir, f"{song_name}_no_crowd.wav")
-                        cleaned = run_onnx_model(current_file, CROWD_MODEL_PATH, no_crowd_path)
-                        self.log.emit("Crowd extraction complete")
+                if self._cancelled:
+                    return
 
-                        crowd_mode = cfg.get("crowd_mode", "remove")
-                        crowd_track = os.path.join(final_dir, f"{song_name}_crowd.wav")
-                        if crowd_mode == "separate":
-                            self._subtract_wavs(current_file, cleaned, crowd_track)
-                            current_file = cleaned
-                        elif crowd_mode == "mix_light":
-                            mixed_path = os.path.join(tmp_dir, f"{song_name}_crowd_mixed.wav")
-                            self._mix_back_lightly(current_file, cleaned, mixed_path, crowd_gain=0.2)
-                            current_file = mixed_path
-                        else:
-                            current_file = cleaned
-                    except Exception as e:
-                        self.log.emit(f"⚠ Crowd ONNX failed, skipping: {e}")
-                else:
-                    self.log.emit(f"⚠ Crowd model missing, skipping: {CROWD_MODEL_PATH}")
+                # ─── Step 4: Export guitar + mix everything-but-guitar ────────
+                self._emit_step(4, "Exporting stems...")
+                guitar_name = f"{song_name}_guitar.wav"
+                final_guitar_path = os.path.join(final_dir, guitar_name)
+                shutil.copy2(guitar_stem, final_guitar_path)
+                self.log.emit(f"✅ Saved isolated guitar stem: {final_guitar_path}")
+                final_path = final_guitar_path
 
-            if cfg.get("remove_reverb", False):
-                self.log.emit("Reverb removal started")
-                if REVERB_MODEL_PATH.lower().endswith(".onnx") and os.path.exists(REVERB_MODEL_PATH):
-                    try:
-                        no_reverb_path = os.path.join(tmp_dir, f"{song_name}_no_reverb.wav")
-                        current_file = run_onnx_model(current_file, REVERB_MODEL_PATH, no_reverb_path)
-                    except Exception as e:
-                        self.log.emit(f"⚠ Reverb ONNX failed, skipping: {e}")
-                elif os.path.exists(REVERB_MODEL_PATH):
-                    self.log.emit("⚠ Reverb model is not ONNX (.pth); skipping ONNX reverb stage")
-                else:
-                    self.log.emit(f"⚠ Reverb model missing, skipping: {REVERB_MODEL_PATH}")
+                # Optional ONNX post-processing on top of `guitar.wav`.
+                current_file = final_guitar_path
+                if cfg.get("remove_crowd", False):
+                    self.log.emit("Running Crowd Removal...")
+                    if os.path.exists(CROWD_MODEL_PATH):
+                        try:
+                            self.log.emit("Crowd model loaded")
+                            no_crowd_path = os.path.join(tmp_dir, f"{song_name}_no_crowd.wav")
+                            cleaned = run_onnx_model(current_file, CROWD_MODEL_PATH, no_crowd_path)
+                            self.log.emit("Crowd extraction complete")
 
-            final_processed = os.path.join(final_dir, f"{song_name}_final.wav")
-            if current_file != final_processed:
-                shutil.copy2(current_file, final_processed)
-            self.log.emit(f"Final output saved: {final_processed}")
-            final_path = final_processed
+                            crowd_mode = cfg.get("crowd_mode", "remove")
+                            crowd_track = os.path.join(final_dir, f"{song_name}_crowd.wav")
+                            if crowd_mode == "separate":
+                                self._subtract_wavs(current_file, cleaned, crowd_track)
+                                current_file = cleaned
+                            elif crowd_mode == "mix_light":
+                                mixed_path = os.path.join(tmp_dir, f"{song_name}_crowd_mixed.wav")
+                                self._mix_back_lightly(current_file, cleaned, mixed_path, crowd_gain=0.2)
+                                current_file = mixed_path
+                            else:
+                                current_file = cleaned
+                        except Exception as e:
+                            self.log.emit(f"⚠ Crowd ONNX failed, skipping: {e}")
+                    else:
+                        self.log.emit(f"⚠ Crowd model missing, skipping: {CROWD_MODEL_PATH}")
 
-            mix_name = f"{song_name}_everything_but_other.wav"
-            mix_path = os.path.join(final_dir, mix_name)
-            if not self._ffmpeg_mix_stems([drums_stem, bass_stem, vocals_stem], mix_path):
-                self.error.emit(
-                    "ffmpeg failed to mix drums, bass, and vocals.",
-                    "Ensure ffmpeg is installed and supports the amix filter.",
-                )
-                return
-            self.log.emit(f"✅ Saved everything-but-other mix: {mix_path}")
-            self.progress.emit(85)
+                if cfg.get("remove_reverb", False):
+                    self.log.emit("Reverb removal started")
+                    if REVERB_MODEL_PATH.lower().endswith(".onnx") and os.path.exists(REVERB_MODEL_PATH):
+                        try:
+                            no_reverb_path = os.path.join(tmp_dir, f"{song_name}_no_reverb.wav")
+                            current_file = run_onnx_model(current_file, REVERB_MODEL_PATH, no_reverb_path)
+                        except Exception as e:
+                            self.log.emit(f"⚠ Reverb ONNX failed, skipping: {e}")
+                    elif os.path.exists(REVERB_MODEL_PATH):
+                        self.log.emit("⚠ Reverb model is not ONNX (.pth); skipping ONNX reverb stage")
+                    else:
+                        self.log.emit(f"⚠ Reverb model missing, skipping: {REVERB_MODEL_PATH}")
+
+                final_processed = os.path.join(final_dir, f"{song_name}_guitar_final.wav")
+                if current_file != final_processed:
+                    shutil.copy2(current_file, final_processed)
+                self.log.emit(f"Final guitar output saved: {final_processed}")
+                final_path = final_processed
+
+                mix_name = f"{song_name}_full_mix_no_guitar.wav"
+                mix_path = os.path.join(final_dir, mix_name)
+                if not self._ffmpeg_mix_stems([vocals_stem, drums_stem, bass_stem, piano_stem, other_stem], mix_path):
+                    self.error.emit(
+                        "ffmpeg failed to mix stems.",
+                        "Ensure ffmpeg is installed and supports the amix filter.",
+                    )
+                    return
+                self.log.emit(f"✅ Saved everything-but-guitar mix: {mix_path}")
+                self.progress.emit(85)
 
             # ─── Cleanup ──────────────────────────────────────────────────
             if cfg.get("clean_temp", True):
@@ -433,10 +534,10 @@ class PipelineWorker(PySide6.QtCore.QThread):
             return False
 
     def _run_demucs(self, input_wav: str, out_dir: str, use_gpu: bool):
-        """Run Demucs htdemucs stem separation."""
+        """Run Demucs htdemucs_6s stem separation."""
         # Build base command
         def make_cmd(extra_flags=None):
-            c = [sys.executable, "-m", "demucs", "-n", "htdemucs", "--out", out_dir]
+            c = [sys.executable, "-m", "demucs", "-n", "htdemucs_6s", "--out", out_dir]
             if not use_gpu:
                 c += ["-d", "cpu"]
             if extra_flags:
@@ -448,20 +549,20 @@ class PipelineWorker(PySide6.QtCore.QThread):
         if not self._has_soundfile():
             self.log.emit("⚠ soundfile not found — attempting mp3 stem output as workaround")
             self.log.emit("  → For best results: pip install soundfile")
-            result = self._run_cmd(make_cmd(["--mp3"]), "demucs pass 1 (mp3 mode)")
+            result = self._run_cmd(make_cmd(["--mp3"]), "demucs (mp3 mode)")
         else:
-            result = self._run_cmd(make_cmd(), "demucs pass 1")
+            result = self._run_cmd(make_cmd(), "demucs")
 
         if result.returncode != 0:
             # Final retry with no extra flags
             self.log.emit("Retrying demucs with no extra flags...")
-            result = self._run_cmd(make_cmd(), "demucs pass 1 retry")
+            result = self._run_cmd(make_cmd(), "demucs retry")
             if result.returncode != 0:
                 self.error.emit(
                     "Demucs stem separation failed.",
                     "Run: pip install soundfile\nThen retry. Also ensure demucs is up to date: pip install -U demucs"
                 )
-                raise RuntimeError("Demucs pass 1 failed")
+                raise RuntimeError("Demucs failed")
 
     def _ffmpeg_mix_stems(self, input_paths: list[str], output_path: str) -> bool:
         """Mix multiple stems into one file (sum without per-input attenuation)."""
