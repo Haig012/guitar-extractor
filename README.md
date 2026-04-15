@@ -1,8 +1,6 @@
 # 🎸 Guitar Extractor
 **Made by Hai Guriel**
 
-☕ [Support me on Ko-fi](https://ko-fi.com/haiguriel)
-
 A Windows desktop application that downloads audio from YouTube, runs Demucs stem separation, and exports the **`other`** stem plus a mix of **drums + bass + vocals** (everything except `other`).
 
 ---
@@ -13,6 +11,7 @@ A Windows desktop application that downloads audio from YouTube, runs Demucs ste
 - 🌍 **English / Hebrew** UI with true RTL layout switching
 - 🚀 **GPU acceleration** auto-detected (CUDA)
 - 🎛️ **5 output formats**: WAV, MP3, M4A, WebM, Opus
+- 📋 **Recent files** history (last 7 tracks)
 - 🛠️ **Dependency checker** with auto-install
 - 📄 **Full logs** saved to export folder
 - 🖥️ **Dark modern UI** with smooth design
@@ -30,7 +29,8 @@ guitar_extractor/
 ├── gui/
 │   ├── main_window.py         ← Main window assembly
 │   ├── card_performance.py    ← Card 1: Input & controls
-│   ├── card_debug.py          ← Card 2: Logs & progress
+│   ├── card_recent.py         ← Card 2: Recent files
+│   ├── card_debug.py          ← Card 3: Logs & progress
 │   ├── dep_dialog.py          ← Dependency check dialog
 │   └── styles.py              ← Dark theme stylesheet
 ├── pipeline/
@@ -114,16 +114,6 @@ The full UI mirrors for true RTL layout in Hebrew.
 | Demucs crashes | Ensure at least 8GB RAM free; try CPU mode |
 | Slow processing | Normal on CPU — GPU (NVIDIA CUDA) is 5-10x faster |
 | DeepFilterNet skipped | Install with `pip install deepfilternet`; non-fatal |
-
----
-
----
-
-## ☕ Support
-
-If you find this tool useful, consider supporting its development:
-
-[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/haiguriel)
 
 ---
 
