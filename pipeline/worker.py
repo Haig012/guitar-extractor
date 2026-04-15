@@ -59,9 +59,7 @@ def run_onnx_model(input_wav: str, model_path: str, output_wav: str) -> str:
 
         inp = piece.astype(np.float32)
         input_dims = len(session.get_inputs()[0].shape)
-        if input_dims == 4:
-            model_input = inp[None, None, None, :]
-        elif input_dims == 3:
+        if input_dims == 3:
             model_input = inp[None, None, :]
         elif input_dims == 2:
             model_input = inp[None, :]
@@ -179,26 +177,14 @@ class PipelineWorker(PySide6.QtCore.QThread):
             if time_range is not None:
                 start_sec, end_sec = time_range
                 if start_sec > 0 or end_sec is not None:
-                    import librosa
-                    actual_duration = librosa.get_duration(path=wav_path)
-                    
-                    # Bounds checking
-                    start_sec = max(0.0, start_sec)
-                    if end_sec is not None:
-                        end_sec = min(end_sec, actual_duration)
-                        end_sec = max(end_sec, start_sec + 0.1) # ensure at least 0.1s segment
-                    
-                    if start_sec >= actual_duration:
-                        self.log.emit(f"⚠ Trim start {start_sec:.2f}s exceeds file duration {actual_duration:.2f}s, skipping trim")
-                    else:
-                        self.log.emit(
-                            f"Trimming to segment: {start_sec:.2f}s → "
-                            f"{end_sec if end_sec is not None else 'end of file'}s"
-                        )
-                        segment_path = os.path.join(tmp_dir, song_name + "_segment.wav")
-                        self._ffmpeg_trim_segment(wav_path, segment_path, start_sec, end_sec)
-                        wav_path = segment_path
-                        temp_files.append(wav_path)
+                    self.log.emit(
+                        f"Trimming to segment: {start_sec:.2f}s → "
+                        f"{end_sec if end_sec is not None else 'end of file'}s"
+                    )
+                    segment_path = os.path.join(tmp_dir, song_name + "_segment.wav")
+                    self._ffmpeg_trim_segment(wav_path, segment_path, start_sec, end_sec)
+                    wav_path = segment_path
+                    temp_files.append(wav_path)
 
             # ─── SOLO TIME PROCESSING MODE ───────────────────────────────────
             if cfg.get("solo_time_enabled", False) and len(cfg.get("solo_time_segments", [])) > 0:
@@ -268,8 +254,12 @@ class PipelineWorker(PySide6.QtCore.QThread):
                 
                 # Optional cleaning: run UVR only on guitar stem
                 if cfg.get("remove_crowd", False) and os.path.exists(CROWD_MODEL_PATH):
-                    self.log.emit("⚠ Crowd Removal temporarily disabled (model requires special MDX preprocessing)")
-                    # Skipped - requires proper STFT spectrogram preprocessing for UVR MDX-Net models
+                    self.log.emit("Running Crowd Removal on guitar stem...")
+                    temp_guitar = os.path.join(tmp_dir, "guitar_temp.wav")
+                    sf.write(temp_guitar, guitar.T, sr)
+                    cleaned = run_onnx_model(temp_guitar, CROWD_MODEL_PATH, temp_guitar + "_cleaned.wav")
+                    guitar, _ = librosa.load(cleaned, sr=sr, mono=False)
+                    temp_files.extend([temp_guitar, cleaned])
                 
                 # Create time mask
                 total_samples = base_mix.shape[1]
@@ -339,8 +329,29 @@ class PipelineWorker(PySide6.QtCore.QThread):
                 # Optional ONNX post-processing on top of `guitar.wav`.
                 current_file = final_guitar_path
                 if cfg.get("remove_crowd", False):
-                    self.log.emit("⚠ Crowd Removal temporarily disabled (model requires special MDX preprocessing)")
-                    # Skipped - requires proper STFT spectrogram preprocessing for UVR MDX-Net models
+                    self.log.emit("Running Crowd Removal...")
+                    if os.path.exists(CROWD_MODEL_PATH):
+                        try:
+                            self.log.emit("Crowd model loaded")
+                            no_crowd_path = os.path.join(tmp_dir, f"{song_name}_no_crowd.wav")
+                            cleaned = run_onnx_model(current_file, CROWD_MODEL_PATH, no_crowd_path)
+                            self.log.emit("Crowd extraction complete")
+
+                            crowd_mode = cfg.get("crowd_mode", "remove")
+                            crowd_track = os.path.join(final_dir, f"{song_name}_crowd.wav")
+                            if crowd_mode == "separate":
+                                self._subtract_wavs(current_file, cleaned, crowd_track)
+                                current_file = cleaned
+                            elif crowd_mode == "mix_light":
+                                mixed_path = os.path.join(tmp_dir, f"{song_name}_crowd_mixed.wav")
+                                self._mix_back_lightly(current_file, cleaned, mixed_path, crowd_gain=0.2)
+                                current_file = mixed_path
+                            else:
+                                current_file = cleaned
+                        except Exception as e:
+                            self.log.emit(f"⚠ Crowd ONNX failed, skipping: {e}")
+                    else:
+                        self.log.emit(f"⚠ Crowd model missing, skipping: {CROWD_MODEL_PATH}")
 
                 if cfg.get("remove_reverb", False):
                     self.log.emit("Reverb removal started")
@@ -440,6 +451,18 @@ class PipelineWorker(PySide6.QtCore.QThread):
             except ValueError:
                 pass
 
+    def _get_ffmpeg_path(self):
+        """Auto-detect FFmpeg path on Windows, returns 'ffmpeg' if not found."""
+        ffmpeg_paths = [
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+        ]
+        for ffmpeg_path in ffmpeg_paths:
+            if os.path.exists(ffmpeg_path):
+                return ffmpeg_path
+        return "ffmpeg"
+
     def _download_youtube(self, url: str, out_dir: str, fmt: str) -> str:
         """Download audio from YouTube using yt-dlp."""
         # Keep downloader output ASCII-safe for Windows console tooling.
@@ -456,20 +479,39 @@ class PipelineWorker(PySide6.QtCore.QThread):
             "--restrict-filenames",
             "--no-playlist",
             "--no-warnings",
-            url
         ]
+        
+        ffmpeg_path = self._get_ffmpeg_path()
+        if ffmpeg_path != "ffmpeg":
+            cmd.extend(["--ffmpeg-location", ffmpeg_path])
+            self.log.emit(f"✅ Detected FFmpeg at: {ffmpeg_path}")
+
+        cmd.append(url)
 
         result = self._run_cmd(cmd, "yt-dlp")
         if result.returncode != 0:
             # Try fallback
             self.log.emit("Retrying with fallback filename template...")
-            cmd[-2] = out_template_fallback
+            # Find the -o parameter index correctly (not using negative indexing)
+            for i, arg in enumerate(cmd):
+                if arg == "-o":
+                    cmd[i+1] = out_template_fallback
+                    break
+            # Add JS runtime fallback for YouTube
+            cmd.extend(["--js-runtimes", "node,deno,python"])
             result = self._run_cmd(cmd, "yt-dlp fallback")
             if result.returncode != 0:
-                self.error.emit(
-                    "yt-dlp failed to download the audio.",
-                    "Check your internet connection, URL validity, and that yt-dlp is up to date: pip install -U yt-dlp"
-                )
+                # Check for common ffmpeg missing error
+                if "ffprobe and ffmpeg not found" in result.stdout or "ffprobe and ffmpeg not found" in result.stderr:
+                    self.error.emit(
+                        "FFmpeg is missing (required for audio conversion).",
+                        "Install FFmpeg: run 'winget install Gyan.FFmpeg' or download from https://ffmpeg.org/download.html"
+                    )
+                else:
+                    self.error.emit(
+                        "yt-dlp failed to download the audio.",
+                        "Check your internet connection, URL validity, and that yt-dlp is up to date: pip install -U yt-dlp"
+                    )
                 raise RuntimeError("yt-dlp download failed")
 
         # Find downloaded file
@@ -491,7 +533,8 @@ class PipelineWorker(PySide6.QtCore.QThread):
 
     def _run_ffmpeg_convert(self, src: str, dst: str):
         """Convert audio file to WAV using ffmpeg."""
-        cmd = ["ffmpeg", "-y", "-i", src, "-ar", "44100", "-ac", "2", dst]
+        ffmpeg_path = self._get_ffmpeg_path()
+        cmd = [ffmpeg_path, "-y", "-i", src, "-ar", "44100", "-ac", "2", dst]
         result = self._run_cmd(cmd, "ffmpeg")
         if result.returncode != 0:
             self.error.emit(
@@ -502,7 +545,8 @@ class PipelineWorker(PySide6.QtCore.QThread):
 
     def _ffmpeg_trim_segment(self, src: str, dst: str, start_sec: float, end_sec: float | None):
         """Extract [start_sec, end_sec) from src; end_sec None means end of file."""
-        cmd = ["ffmpeg", "-y", "-i", src, "-ss", str(start_sec)]
+        ffmpeg_path = self._get_ffmpeg_path()
+        cmd = [ffmpeg_path, "-y", "-i", src, "-ss", str(start_sec)]
         if end_sec is not None:
             cmd += ["-t", str(end_sec - start_sec)]
         cmd += ["-ar", "44100", "-ac", "2", dst]
@@ -513,11 +557,6 @@ class PipelineWorker(PySide6.QtCore.QThread):
                 "Check that start/end are valid for this file and that ffmpeg works.",
             )
             raise RuntimeError("ffmpeg trim failed")
-            
-        # Verify output file is not empty
-        if not os.path.exists(dst) or os.path.getsize(dst) < 44: # minimum WAV header size
-            self.log.emit(f"⚠ Trim produced empty file, falling back to full audio")
-            shutil.copy2(src, dst)
 
     def _has_soundfile(self) -> bool:
         """Check if soundfile backend is available for torchaudio."""
@@ -565,7 +604,8 @@ class PipelineWorker(PySide6.QtCore.QThread):
         if len(input_paths) == 1:
             shutil.copy2(input_paths[0], output_path)
             return True
-        cmd = ["ffmpeg", "-y"]
+        ffmpeg_path = self._get_ffmpeg_path()
+        cmd = [ffmpeg_path, "-y"]
         for p in input_paths:
             cmd += ["-i", p]
         n = len(input_paths)
