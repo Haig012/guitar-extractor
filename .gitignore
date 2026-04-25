@@ -1,8 +1,10 @@
 # Audio exports
 Exports/
+exported_files/
 
-# Models
+# ML models (multi-hundred MB — don't commit)
 *.onnx
+*.pth
 resources/
 
 # Logs
@@ -12,3 +14,21 @@ resources/
 # Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/settings.json
+.idea/
+.claude/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Junk captured from pip redirects
+6.6.0
+git

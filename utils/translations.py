@@ -1,220 +1,153 @@
 """
-Localization strings for English and Hebrew
+English + Hebrew localisation.
 """
+from __future__ import annotations
+
 
 TRANSLATIONS = {
     "en": {
         # Header
-        "made_by": "Made by Hai Guriel",
         "app_title": "Guitar Extractor",
-        "app_subtitle": "Export the Demucs \"other\" stem and a full mix without it",
+        "app_subtitle": "Isolate the guitar. Jam over the rest.",
+        "made_by": "Made by Hai Guriel",
 
-        # Card titles
-        "card_performance": "⚙️  Performance",
-        "card_recent": "🕘  Recent Files",
-        "card_debug": "🛠  Debugging & Status",
+        # Section labels
+        "section_input": "Source",
+        "section_output": "Output",
+        "section_time": "Time range (optional)",
+        "section_solo": "Solo time",
+        "section_cleanup": "Cleanup (optional, slow)",
+        "section_player": "Listen",
+        "section_progress": "Progress",
 
-        # Card 1 - Performance
-        "export_folder": "Export Folder",
-        "export_folder_placeholder": "Select output folder...",
+        # Input
+        "youtube_link": "YouTube link",
+        "upload_pc": "Local file",
+        "url_placeholder": "Paste a YouTube URL…",
+        "upload_placeholder": "Drop an audio file here or click Browse",
         "browse": "Browse",
-        "input_source": "Input Source",
-        "youtube_link": "YouTube Link",
-        "upload_pc": "Upload from PC",
-        "url_placeholder": "Paste YouTube URL here...",
-        "upload_placeholder": "Click to select audio file...",
-        "output_format": "Output Format",
-        "time_range_label": "Time range (optional)",
-        "time_range_placeholder": "e.g. 2:00 - 4:56   or   start - 6:47   or   4:56 - end",
-        "time_range_invalid_title": "Invalid time range",
-        "remove_crowd_noise": "Remove Crowd Noise",
-        "remove_reverb": "Remove Reverb",
-        "crowd_handling_mode": "Crowd Handling Mode",
-        "crowd_mode_remove": "Remove Completely",
-        "crowd_mode_separate": "Keep as Separate File",
-        "crowd_mode_mix_light": "Mix Back Lightly",
-        "show_details": "Show details",
-        "hide_details": "Hide details",
-        "open_folder": "Open Folder",
-        "enable_solo_time": "Enable Solo Time",
-        "add_segment": "+ Add Segment",
-        "solo_segments_title": "🎸 Solo Segments",
+        "export_folder": "Export folder",
+
+        # Output
+        "output_format": "Download format",
+        "time_range_hint": "e.g. 1:00 - 2:30   •   blank = full track",
+        "time_start": "Start",
+        "time_end": "End",
+
+        # Solo time
+        "remove_reverb": "Remove reverb / echo (UVR DeEcho-DeReverb)",
+        "remove_crowd": "Remove crowd noise (UVR MDX-Net Crowd)",
+        "uvr_hint_ok": "UVR ready — checked options will run on each output track.",
+        "uvr_pkg_missing": "audio-separator not installed (pip install audio-separator[gpu])",
+        "uvr_dereverb_missing": "UVR-DeEcho-DeReverb.pth missing in resources/",
+        "uvr_crowd_missing": "UVR-MDX-NET_Crowd_HQ_1.onnx missing in resources/",
+
+        "enable_solo_time": "Enable Solo Time (guitar only during these windows)",
+        "solo_title": "Solo segments",
+        "add_segment": "+ Add segment",
+        "remove_segment": "Remove",
+
+        # Go
+        "go_button": "EXTRACT",
+        "go_button_processing": "PROCESSING…",
+        "repeat_last": "Repeat last job",
         "status_ready": "Ready",
-        "go_button": "🎸  GO",
-        "go_button_processing": "Processing...",
-        "repeat_last": "🔁  Repeat Last Job",
-        "check_deps": "🔍  Check Dependencies",
+        "cancel": "Cancel",
 
-        # Card 2 - Recent Files
-        "recent_empty": "No recent files yet.",
-        "recent_open": "Click a file to open it",
-        "clear_recent": "Clear History",
+        # Player
+        "player_guitar": "Guitar only",
+        "player_backing": "No-guitar backing",
+        "player_solo": "Solo mix",
+        "tempo": "Tempo",
+        "volume": "Volume",
+        "open_folder": "Open folder",
 
-        # Card 3 - Debug
-        "progress": "Progress",
+        # Debug
+        "log_title": "Pipeline log",
+        "save_log": "Save log",
+        "clear_log": "Clear",
+        "show_log": "Show log",
+        "hide_log": "Hide log",
         "eta": "ETA",
         "status": "Status",
-        "eta_calculating": "Calculating...",
-        "eta_unknown": "Unknown",
-        "save_log": "💾  Save Log",
-        "clear_log": "🗑  Clear Log",
-        "open_output": "📂  Open Output Folder",
 
-        # Pipeline steps
-        "step_check": "Checking dependencies...",
-        "step_download": "Downloading audio from YouTube...",
-        "step_convert": "Converting format...",
-        "step_demucs1": "Separating stems (Pass 1)...",
-        "step_demucs2": "Second stem pass (unused)...",
-        "step_filter": "Cleaning noise with DeepFilterNet...",
-        "step_export": "Exporting final file...",
-        "step_cleanup": "Cleaning up temp files...",
-        "step_done": "✅  Done! Stems exported.",
-        "export_done_title": "Done! 🎸",
-         "export_done_body": "Saved in:\n{folder}\n\n{other}\n{mix}",
-
-        # Errors
-        "error_invalid_url": "Invalid YouTube URL. Please check the link.",
-        "error_no_input": "Please provide a YouTube URL or upload a file.",
-        "error_no_folder": "Please select an export folder.",
-        "error_ytdlp": "yt-dlp failed. Check your internet connection or URL.",
-        "error_demucs": "Demucs stem separation failed.",
-        "error_deepfilter": "DeepFilterNet noise cleaning failed.",
-        "error_ffmpeg": "ffmpeg not found. Please install ffmpeg and add it to PATH.",
-        "error_file_not_found": "Input file not found.",
-        "error_missing_dep": "Missing dependency: {dep}",
-
-        # Dependency check
-        "dep_check_title": "Dependency Check",
-        "dep_found": "✅  {dep} — found",
-        "dep_missing": "❌  {dep} — NOT found",
-        "dep_install_hint": "Install with: {cmd}",
-        "dep_all_ok": "All dependencies are installed!",
-        "dep_auto_install": "Auto-Install Missing",
-
-        # Misc
-        "gpu_detected": "🚀  GPU detected — using CUDA acceleration",
-        "gpu_not_detected": "💻  No GPU — using CPU (slower)",
-        "file_label": "{name} — {date}",
-        "confirm_clear": "Clear all recent file history?",
-        "yes": "Yes",
-        "no": "No",
-        "settings": "⚙  Settings",
-        "language": "Language",
+        # Dialogs
+        "export_done_title": "Done",
+        "export_done_body": "Saved to:\n{folder}",
+        "error_no_folder": "Please choose an export folder.",
+        "error_invalid_time": "Invalid time: {msg}",
+        "error_no_previous": "No previous job to repeat yet.",
+        "confirm_cancel_exit": "A job is currently running. Cancel and exit?",
     },
-
     "he": {
-        # Header
-        "made_by": "נוצר על ידי חי גוריאל",
         "app_title": "חילוץ גיטרה",
-        "app_subtitle": "ייצוא גזע \"other\" של Demucs ומיקס מלא בלעדיו",
+        "app_subtitle": "מבודד את הגיטרה. ג'אם מעל השאר.",
+        "made_by": "נוצר על ידי חי גוריאל",
 
-        # Card titles
-        "card_performance": "⚙️  ביצועים",
-        "card_recent": "🕘  קבצים אחרונים",
-        "card_debug": "🛠  ניפוי שגיאות וסטטוס",
+        "section_input": "מקור",
+        "section_output": "פלט",
+        "section_time": "טווח זמן (אופציונלי)",
+        "section_solo": "זמן סולו",
+        "section_cleanup": "ניקוי (אופציונלי, איטי)",
+        "section_player": "האזנה",
+        "section_progress": "התקדמות",
 
-        # Card 1 - Performance
-        "export_folder": "תיקיית יצוא",
-        "export_folder_placeholder": "בחר תיקיית פלט...",
+        "youtube_link": "קישור יוטיוב",
+        "upload_pc": "קובץ מקומי",
+        "url_placeholder": "הדבק קישור יוטיוב…",
+        "upload_placeholder": "גרור קובץ אודיו או לחץ עיון",
         "browse": "עיון",
-        "input_source": "מקור קלט",
-        "youtube_link": "קישור מיוטיוב",
-        "upload_pc": "העלה מהמחשב",
-        "url_placeholder": "הדבק פה את הקישור מיוטיוב",
-        "upload_placeholder": "לחץ לבחירת קובץ שמע...",
-        "output_format": "פורמט פלט",
-        "time_range_label": "טווח זמן (אופציונלי)",
-        "time_range_placeholder": "למשל 2:00 - 4:56   או   start - 6:47   או   4:56 - end",
-        "time_range_invalid_title": "טווח זמן לא תקין",
-        "remove_crowd_noise": "הסר רעש קהל",
-        "remove_reverb": "הסר ריוורב",
-        "crowd_handling_mode": "אופן טיפול בקהל",
-        "crowd_mode_remove": "הסר לגמרי",
-        "crowd_mode_separate": "שמור כקובץ נפרד",
-        "crowd_mode_mix_light": "ערבב חזרה בעדינות",
-        "show_details": "הצג פרטים",
-        "hide_details": "הסתר פרטים",
-        "open_folder": "פתח תיקייה",
-        "enable_solo_time": "אפשר מצב סולו",
+        "export_folder": "תיקיית יצוא",
+
+        "output_format": "פורמט הורדה",
+        "time_range_hint": "למשל 1:00 - 2:30   •   ריק = כל השיר",
+        "time_start": "התחלה",
+        "time_end": "סיום",
+
+        "remove_reverb": "הסר ריוורב והדים (UVR DeEcho-DeReverb)",
+        "remove_crowd": "הסר רעש קהל (UVR MDX-Net Crowd)",
+        "uvr_hint_ok": "UVR מוכן — האפשרויות שנבחרו יורצו על כל קובץ פלט.",
+        "uvr_pkg_missing": "audio-separator לא מותקן (pip install audio-separator[gpu])",
+        "uvr_dereverb_missing": "חסר UVR-DeEcho-DeReverb.pth בתיקיית resources/",
+        "uvr_crowd_missing": "חסר UVR-MDX-NET_Crowd_HQ_1.onnx בתיקיית resources/",
+
+        "enable_solo_time": "הפעל זמן סולו (גיטרה רק בחלונות שייבחרו)",
+        "solo_title": "קטעי סולו",
         "add_segment": "+ הוסף קטע",
-        "solo_segments_title": "🎸 קטעי סולו",
+        "remove_segment": "הסר",
+
+        "go_button": "הפעל",
+        "go_button_processing": "מעבד…",
+        "repeat_last": "חזור על המשימה הקודמת",
         "status_ready": "מוכן",
-        "go_button": "🎸  הפעל",
-        "go_button_processing": "מעבד...",
-        "repeat_last": "🔁  חזור על המשימה הקודמת",
-        "check_deps": "🔍  בדוק תלויות",
+        "cancel": "ביטול",
 
-        # Card 2 - Recent Files
-        "recent_empty": "אין קבצים אחרונים עדיין.",
-        "recent_open": "לחץ על קובץ לפתיחה",
-        "clear_recent": "נקה היסטוריה",
+        "player_guitar": "גיטרה בלבד",
+        "player_backing": "רקע ללא גיטרה",
+        "player_solo": "מיקס סולו",
+        "tempo": "מהירות",
+        "volume": "עוצמה",
+        "open_folder": "פתח תיקייה",
 
-        # Card 3 - Debug
-        "progress": "התקדמות",
+        "log_title": "יומן פעולה",
+        "save_log": "שמור לוג",
+        "clear_log": "נקה",
+        "show_log": "הצג לוג",
+        "hide_log": "הסתר לוג",
         "eta": "זמן משוער",
         "status": "סטטוס",
-        "eta_calculating": "מחשב...",
-        "eta_unknown": "לא ידוע",
-        "save_log": "💾  שמור לוג",
-        "clear_log": "🗑  נקה לוג",
-        "open_output": "📂  פתח תיקיית פלט",
 
-        # Pipeline steps
-        "step_check": "בודק תלויות...",
-        "step_download": "מוריד שמע מ-YouTube...",
-        "step_convert": "ממיר פורמט...",
-        "step_demucs1": "מפריד גזעים (סבב 1)...",
-        "step_demucs2": "סבב גזעים שני (לא בשימוש)...",
-        "step_filter": "מנקה רעש עם DeepFilterNet...",
-        "step_export": "מייצא קובץ סופי...",
-        "step_cleanup": "מנקה קבצים זמניים...",
-        "step_done": "✅  סיום! הגזעים יוצאו.",
-        "export_done_title": "סיום! 🎸",
-         "export_done_body": "נשמר ב:\n{folder}\n\n{other}\n{mix}",
-
-        # Errors
-        "error_invalid_url": "קישור YouTube לא תקין. בדוק את הקישור.",
-        "error_no_input": "נא לספק קישור YouTube או להעלות קובץ.",
-        "error_no_folder": "נא לבחור תיקיית יצוא.",
-        "error_ytdlp": "yt-dlp נכשל. בדוק את החיבור לאינטרנט או את הקישור.",
-        "error_demucs": "הפרדת הגזעים של Demucs נכשלה.",
-        "error_deepfilter": "ניקוי הרעש של DeepFilterNet נכשל.",
-        "error_ffmpeg": "ffmpeg לא נמצא. נא להתקין ffmpeg ולהוסיפו ל-PATH.",
-        "error_file_not_found": "קובץ קלט לא נמצא.",
-        "error_missing_dep": "תלות חסרה: {dep}",
-
-        # Dependency check
-        "dep_check_title": "בדיקת תלויות",
-        "dep_found": "✅  {dep} — נמצא",
-        "dep_missing": "❌  {dep} — לא נמצא",
-        "dep_install_hint": "התקן עם: {cmd}",
-        "dep_all_ok": "כל התלויות מותקנות!",
-        "dep_auto_install": "התקן אוטומטית חסרים",
-
-        # Misc
-        "gpu_detected": "🚀  GPU זוהה — משתמש בהאצת CUDA",
-        "gpu_not_detected": "💻  אין GPU — משתמש במעבד (איטי יותר)",
-        "file_label": "{name} — {date}",
-        "confirm_clear": "לנקות את כל היסטוריית הקבצים האחרונים?",
-        "yes": "כן",
-        "no": "לא",
-        "settings": "⚙  הגדרות",
-        "language": "שפה",
-    }
-}
-
-INSTALL_COMMANDS = {
-    "yt-dlp": "pip install yt-dlp",
-    "demucs": "pip install demucs",
-    "deepfilternet": "pip install deepfilternet",
-    "soundfile": "pip install soundfile",
-    "ffmpeg": "winget install ffmpeg  (or download from ffmpeg.org)",
+        "export_done_title": "סיום",
+        "export_done_body": "נשמר ב:\n{folder}",
+        "error_no_folder": "אנא בחר תיקיית יצוא.",
+        "error_invalid_time": "טווח זמן לא תקין: {msg}",
+        "error_no_previous": "אין משימה קודמת לחזור עליה.",
+        "confirm_cancel_exit": "משימה רצה כעת. לבטל ולצאת?",
+    },
 }
 
 
 def get_text(lang: str, key: str, **kwargs) -> str:
-    """Get translated text for a given key."""
     text = TRANSLATIONS.get(lang, TRANSLATIONS["en"]).get(key, key)
     if kwargs:
         try:
