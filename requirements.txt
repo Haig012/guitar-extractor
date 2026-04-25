@@ -7,17 +7,19 @@ PySide6>=6.6.0
 # YouTube downloader
 yt-dlp>=2024.1.0
 
-# Stem separation (installs torch, torchaudio automatically)
+# Stem separation (installs torch + torchaudio automatically)
 demucs>=4.0.0
 
-# Required torchaudio backend for WAV file writing on Windows
+# Audio I/O (required WAV backend for torchaudio on Windows)
 soundfile>=0.12.1
+
+# Audio analysis (load / resample / time-stretch via phase vocoder)
 librosa>=0.10.1
 numpy>=1.24.0
-onnxruntime>=1.17.0
 
-# Noise cleaning
-deepfilternet>=0.5.6
+# UVR post-processing (de-reverb / de-crowd) — optional but recommended.
+# Use [gpu] for CUDA, swap to [cpu] if you have no NVIDIA GPU.
+audio-separator[gpu]>=0.28.0
 
 # ffmpeg must be installed separately:
 #   Windows: winget install Gyan.FFmpeg
