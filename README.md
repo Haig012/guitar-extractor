@@ -2,7 +2,7 @@
 
 **Made by Hai Guriel**
 
-Isolate the guitar from any song and jam over the rest — a desktop app for guitar players.
+Isolate the guitar from any song. Built-in player with A/B loop, tempo control, and UVR de-reverb / de-crowd. PySide6 + Demucs + audio-separator.
 
 ![Main interface](docs/screenshots/01_main_interface.png)
 
