@@ -2,22 +2,20 @@
 title Guitar Extractor - Made by Hai Guriel
 cd /d "%~dp0"
 
-REM Check Python
-python --version >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Python not found. Please install Python 3.10+ from https://python.org
+REM Use the KaraokeFactory venv: it has the GPU torch + demucs + yt-dlp this app needs.
+set "VENV=C:\Users\haig0\KaraokeFactory\services\python\.venv"
+
+if not exist "%VENV%\Scripts\python.exe" (
+    echo ERROR: Expected Python venv not found at "%VENV%".
+    echo Edit run.bat and point VENV at a Python env that has demucs, torch and yt-dlp.
     pause
     exit /b 1
 )
 
-REM Check PySide6
-python -c "import PySide6" >nul 2>&1
-if errorlevel 1 (
-    echo Installing PySide6...
-    pip install PySide6
-)
+REM Put the venv Scripts on PATH so the bare "yt-dlp" call resolves.
+set "PATH=%VENV%\Scripts;%PATH%"
 
-python main.py
+"%VENV%\Scripts\python.exe" main.py
 if errorlevel 1 (
     echo.
     echo Application exited with an error.

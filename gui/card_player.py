@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QSlider, QFrame, QSizePolicy, QButtonGroup,
 )
 
+from pipeline.chords import parse_lrc
 from utils.translations import get_text
 
 
@@ -41,6 +42,7 @@ class PlayerCard(QWidget):
         self._loop_b_ms: int | None = None
         self._user_seeking = False
         self._prefer_clean = True
+        self._chords: list[tuple[float, str]] = []  # (start_seconds, label)
 
         self._player = QMediaPlayer(self)
         self._audio_out = QAudioOutput(self)
@@ -64,8 +66,15 @@ class PlayerCard(QWidget):
         """
         self._all_tracks = {k: v for k, v in tracks.items() if v and k != "folder"}
         self._folder = tracks.get("folder", "")
+        self._load_chords(tracks.get("chords_lrc"))
         self._refresh_buttons()
         self.cleanToggle.setVisible(self._has_any_cleaned())
+
+    def _load_chords(self, lrc_path):
+        raw = parse_lrc(lrc_path) if lrc_path and os.path.isfile(lrc_path) else []
+        self._chords = [(t, lab) for t, lab in raw if lab != "N.C."]
+        self.chordRow.setVisible(bool(self._chords))
+        self._update_chord_label(self._player.position())
 
     def _has_any_cleaned(self) -> bool:
         return any(
@@ -109,6 +118,7 @@ class PlayerCard(QWidget):
         self.btnGuitar.setText(get_text(lang, "player_guitar"))
         self.btnBacking.setText(get_text(lang, "player_backing"))
         self.btnSolo.setText(get_text(lang, "player_solo"))
+        self.chordCaption.setText("🎼  " + get_text(lang, "chord_now"))
         self.tempoLabel.setText(get_text(lang, "tempo"))
         self.volumeLabel.setText(get_text(lang, "volume"))
         self.openFolderBtn.setText("📂  " + get_text(lang, "open_folder"))
@@ -127,6 +137,25 @@ class PlayerCard(QWidget):
         self.titleLabel = QLabel()
         self.titleLabel.setObjectName("cardTitle")
         root.addWidget(self.titleLabel)
+
+        # Current-chord display (only visible when a chord chart was produced)
+        self.chordRow = QWidget()
+        chord_layout = QHBoxLayout(self.chordRow)
+        chord_layout.setContentsMargins(0, 0, 0, 0)
+        chord_layout.setSpacing(10)
+        self.chordCaption = QLabel()
+        self.chordCaption.setObjectName("sectionLabel")
+        self.chordValue = QLabel("—")
+        self.chordValue.setObjectName("chordValue")
+        self.chordValue.setStyleSheet("font-size: 30px; font-weight: 700;")
+        self.chordNext = QLabel("")
+        self.chordNext.setObjectName("timeLabel")
+        chord_layout.addWidget(self.chordCaption)
+        chord_layout.addWidget(self.chordValue)
+        chord_layout.addStretch()
+        chord_layout.addWidget(self.chordNext)
+        root.addWidget(self.chordRow)
+        self.chordRow.setVisible(False)
 
         # Track switcher
         track_row = QHBoxLayout()
@@ -310,9 +339,26 @@ class PlayerCard(QWidget):
         if not self._user_seeking:
             self.seekSlider.setValue(ms)
         self.timeCurLabel.setText(_fmt_ms(ms))
+        self._update_chord_label(ms)
+
+    def _update_chord_label(self, ms: int):
+        if not self._chords:
+            return
+        t = ms / 1000.0
+        cur = "—"
+        nexts: list[str] = []
+        for i, (start, label) in enumerate(self._chords):
+            if start <= t:
+                cur = label
+                nexts = [lab for _, lab in self._chords[i + 1:i + 3]]
+            else:
+                break
+        self.chordValue.setText(cur)
+        self.chordNext.setText("→  " + "   ".join(nexts) if nexts else "")
 
     def _on_seek_move(self, v: int):
         self.timeCurLabel.setText(_fmt_ms(v))
+        self._update_chord_label(v)
 
     def _on_seek_release(self):
         self._user_seeking = False

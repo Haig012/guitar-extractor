@@ -70,6 +70,8 @@ class PerformanceCard(QWidget):
         self.lang = lang
         self.settings = settings or {}
         self._selected_format = self.settings.get("format", "wav")
+        self._export_video = bool(self.settings.get("export_video", False))
+        self._detect_chords = bool(self.settings.get("detect_chords", False))
         self._remove_reverb = bool(self.settings.get("remove_reverb", False))
         self._remove_crowd = bool(self.settings.get("remove_crowd", False))
         self._solo_segments: list[dict] = []
@@ -134,7 +136,7 @@ class PerformanceCard(QWidget):
         self.folderEdit = QLineEdit()
         self.folderEdit.setText(self.settings.get(
             "export_folder",
-            str(Path.home() / "Desktop" / "exported_files"),
+            str(Path.home() / "Desktop" / "Backing Tracks"),
         ))
         self.folderEdit.setReadOnly(True)
         self.browseBtn = QPushButton()
@@ -178,6 +180,24 @@ class PerformanceCard(QWidget):
         fmt_row.addStretch()
         layout.addLayout(fmt_row)
         self._select_format(self._selected_format)
+
+        # ── Play-along video ──────────────────────────────
+        self.exportVideoCheckbox = QCheckBox()
+        self.exportVideoCheckbox.setChecked(self._export_video)
+        layout.addWidget(self.exportVideoCheckbox)
+        self.exportVideoHint = QLabel()
+        self.exportVideoHint.setObjectName("hint")
+        self.exportVideoHint.setWordWrap(True)
+        layout.addWidget(self.exportVideoHint)
+
+        # ── Chord detection ───────────────────────────────
+        self.detectChordsCheckbox = QCheckBox()
+        self.detectChordsCheckbox.setChecked(self._detect_chords)
+        layout.addWidget(self.detectChordsCheckbox)
+        self.detectChordsHint = QLabel()
+        self.detectChordsHint.setObjectName("hint")
+        self.detectChordsHint.setWordWrap(True)
+        layout.addWidget(self.detectChordsHint)
 
         # ── Cleanup options (UVR) ─────────────────────────
         self.cleanupLabel = self._section_label()
@@ -338,6 +358,8 @@ class PerformanceCard(QWidget):
                 else self.fileEdit.text().strip()
             ),
             "format": self._selected_format,
+            "export_video": self.exportVideoCheckbox.isChecked(),
+            "detect_chords": self.detectChordsCheckbox.isChecked(),
             "clean_temp": True,
             "time_range": time_range,
             "solo_time_enabled": self.soloCheckbox.isChecked(),
@@ -394,6 +416,7 @@ class PerformanceCard(QWidget):
             self.urlEdit, self.fileEdit, self.timeStartEdit, self.timeEndEdit,
             self.soloCheckbox, self.addSegmentBtn, self.repeatBtn,
             self.removeReverbCheckbox, self.removeCrowdCheckbox,
+            self.exportVideoCheckbox, self.detectChordsCheckbox,
             *self._format_buttons.values(),
         ):
             w.setEnabled(not processing)
@@ -418,6 +441,10 @@ class PerformanceCard(QWidget):
         self.timeStartEdit.setPlaceholderText(t("time_start"))
         self.timeEndEdit.setPlaceholderText(t("time_end"))
         self.outputLabel.setText(t("output_format"))
+        self.exportVideoCheckbox.setText("🎬  " + t("export_video"))
+        self.exportVideoHint.setText(t("export_video_hint"))
+        self.detectChordsCheckbox.setText("🎼  " + t("detect_chords"))
+        self.detectChordsHint.setText(t("detect_chords_hint"))
         self.cleanupLabel.setText(t("section_cleanup"))
         self.removeReverbCheckbox.setText("💧  " + t("remove_reverb"))
         self.removeCrowdCheckbox.setText("👥  " + t("remove_crowd"))

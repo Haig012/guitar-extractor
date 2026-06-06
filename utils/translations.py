@@ -30,6 +30,10 @@ TRANSLATIONS = {
 
         # Output
         "output_format": "Download format",
+        "export_video": "Also export play-along video (guitar removed)",
+        "export_video_hint": "Needs a video source (YouTube link or local video file). Turn on 'Detect chords' too to run the chords on screen.",
+        "detect_chords": "Detect chords (from the guitar stem)",
+        "detect_chords_hint": "Writes a timed chord sheet (.txt/.lrc/.srt). With the video option on, the chords are burned onto the play-along video. Best on clean triads; names only, no 7ths/inversions.",
         "time_range_hint": "e.g. 1:00 - 2:30   •   blank = full track",
         "time_start": "Start",
         "time_end": "End",
@@ -58,6 +62,7 @@ TRANSLATIONS = {
         "player_guitar": "Guitar only",
         "player_backing": "No-guitar backing",
         "player_solo": "Solo mix",
+        "chord_now": "Chord",
         "tempo": "Tempo",
         "volume": "Volume",
         "open_folder": "Open folder",
@@ -100,6 +105,10 @@ TRANSLATIONS = {
         "export_folder": "תיקיית יצוא",
 
         "output_format": "פורמט הורדה",
+        "export_video": "ייצא גם וידאו לנגינה (גיטרה הוסרה)",
+        "export_video_hint": "דורש מקור וידאו (קישור יוטיוב או קובץ וידאו מקומי). הפעל גם 'זהה אקורדים' כדי שהאקורדים ירוצו על המסך.",
+        "detect_chords": "זהה אקורדים (מתוך הגיטרה המבודדת)",
+        "detect_chords_hint": "יוצר דף אקורדים מתוזמן (txt./lrc./srt.). כשאפשרות הווידאו פעילה, האקורדים נצרבים על הווידאו לנגינה. מדויק באקורדים פשוטים; שמות בלבד, ללא היפוכים/אקורדי 7.",
         "time_range_hint": "למשל 1:00 - 2:30   •   ריק = כל השיר",
         "time_start": "התחלה",
         "time_end": "סיום",
@@ -125,6 +134,7 @@ TRANSLATIONS = {
         "player_guitar": "גיטרה בלבד",
         "player_backing": "רקע ללא גיטרה",
         "player_solo": "מיקס סולו",
+        "chord_now": "אקורד",
         "tempo": "מהירות",
         "volume": "עוצמה",
         "open_folder": "פתח תיקייה",

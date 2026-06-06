@@ -11,6 +11,12 @@ Pipeline:
          <song>_no_guitar.wav   (everything else, summed)
        Solo-Time mode: produces one <song>_solo_mix.wav where the guitar is
        only present during the user-chosen segments.
+       Play-along video (optional): when a video source is available, muxes the
+       source video with the guitar-removed (or solo) audio into
+       <song>_no_guitar_video.mp4 / <song>_solo_video.mp4.
+       Chord detection (optional): analyses the isolated guitar stem and writes
+       <song>_chords.txt / .lrc / .srt; the .srt is burned onto the video so the
+       chords run on screen during playback.
 """
 from __future__ import annotations
 
@@ -35,6 +41,7 @@ from utils.helpers import (
     clean_temp_files,
 )
 from utils.solo_mask import create_fade_mask, apply_solo_mask
+from .chords import detect_chords, write_chords_txt, write_chords_lrc, write_chords_srt
 from .uvr import UVRProcessor, is_available as uvr_available, model_present, DEREVERB_MODEL, CROWD_MODEL
 
 
@@ -77,10 +84,10 @@ class PipelineWorker(QThread):
             use_gpu = detect_gpu()
 
             ensure_dir(export_folder)
-            final_dir = os.path.join(export_folder, "final_result")
-            ensure_dir(final_dir)
             tmp_dir = os.path.join(export_folder, "_tmp")
             ensure_dir(tmp_dir)
+            # final_dir is a per-song subfolder — created once we know the name.
+            final_dir = export_folder
 
             self.log.emit("🚀 GPU detected — using CUDA" if use_gpu else "💻 No GPU — running on CPU")
 
@@ -99,6 +106,27 @@ class PipelineWorker(QThread):
 
             temp_files.append(audio_path)
             song_name = sanitize_cli_filename(Path(audio_path).stem)
+
+            # Each song gets its own subfolder under the export root.
+            final_dir = os.path.join(export_folder, song_name)
+            ensure_dir(final_dir)
+
+            # Optionally grab a video source for the play-along export.
+            video_src: str | None = None
+            if cfg.get("export_video", False):
+                if input_type == "youtube":
+                    self.log.emit("🎬 Fetching video stream for play-along export…")
+                    video_src = self._download_youtube_video(input_value, tmp_dir)
+                    if video_src:
+                        temp_files.append(video_src)
+                    else:
+                        self.log.emit("⚠ Could not download the video — skipping video export")
+                else:
+                    if self._has_video_stream(input_value):
+                        video_src = input_value  # mux against the untouched original
+                    else:
+                        self.log.emit("⚠ Local file has no video stream — skipping video export")
+
             self.progress.emit(20)
             if self._cancelled:
                 return
@@ -177,6 +205,16 @@ class PipelineWorker(QThread):
                     result["no_guitar"] = no_guitar_path
                 else:
                     self.log.emit("⚠ Could not build backing track")
+
+            # Chord detection on the raw isolated guitar stem.
+            if cfg.get("detect_chords", False):
+                self._detect_chords(stems["guitar"], result, song_name, final_dir)
+
+            # Play-along video: source video + guitar-removed (or solo) audio.
+            if video_src:
+                self._export_play_along_video(
+                    video_src, result, song_name, final_dir, time_range,
+                )
 
             self.progress.emit(80)
             if self._cancelled:
@@ -336,7 +374,7 @@ class PipelineWorker(QThread):
         self.status.emit(message)
         self.log.emit(f"[{step}/{self.TOTAL_STEPS}] {message}")
 
-    def _run_cmd(self, cmd: list, label: str = "") -> subprocess.CompletedProcess:
+    def _run_cmd(self, cmd: list, label: str = "", cwd: str | None = None) -> subprocess.CompletedProcess:
         self.log.emit(f"$ {' '.join(str(c) for c in cmd)}")
         proc = subprocess.Popen(
             cmd,
@@ -345,6 +383,7 @@ class PipelineWorker(QThread):
             text=True,
             encoding="utf-8",
             errors="replace",
+            cwd=cwd,
         )
         lines: list[str] = []
         for line in proc.stdout:
@@ -441,6 +480,166 @@ class PipelineWorker(QThread):
                         pass
                 return str(f)
         raise FileNotFoundError("Downloaded file not found in output directory")
+
+    def _download_youtube_video(self, url: str, out_dir: str) -> str | None:
+        """Download the merged video (bestvideo+bestaudio → mp4) for play-along export."""
+        template = os.path.join(out_dir, "video_%(id)s.%(ext)s")
+        cmd = [
+            "yt-dlp", "-f", "bv*+ba/b", "--merge-output-format", "mp4",
+            "-o", template,
+            "--restrict-filenames", "--no-playlist", "--no-warnings",
+        ]
+        ffmpeg_dir = self._ffmpeg_dir()
+        if ffmpeg_dir:
+            cmd += ["--ffmpeg-location", ffmpeg_dir]
+        cmd.append(url)
+
+        if self._run_cmd(cmd, "yt-dlp video").returncode != 0:
+            return None
+
+        # Prefer the merged mp4; fall back to any video_* container yt-dlp produced.
+        candidates = sorted(Path(out_dir).glob("video_*.mp4"))
+        if not candidates:
+            candidates = [
+                f for f in Path(out_dir).glob("video_*.*")
+                if f.suffix.lower() in (".mkv", ".webm", ".mov", ".avi", ".m4v")
+            ]
+        return str(candidates[0]) if candidates else None
+
+    def _ffprobe_path(self) -> str:
+        """ffprobe.exe living next to ffmpeg, else literal "ffprobe" (rely on PATH)."""
+        ff = self._get_ffmpeg()
+        if ff and ff != "ffmpeg" and os.path.isfile(ff):
+            cand = os.path.join(os.path.dirname(ff), "ffprobe.exe")
+            if os.path.isfile(cand):
+                return cand
+        return "ffprobe"
+
+    def _has_video_stream(self, path: str) -> bool:
+        try:
+            out = subprocess.check_output(
+                [
+                    self._ffprobe_path(), "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=codec_type",
+                    "-of", "csv=p=0", path,
+                ],
+                text=True, stderr=subprocess.STDOUT,
+            )
+            return "video" in out
+        except Exception:
+            # ffprobe unavailable — fall back to a container-extension guess.
+            return Path(path).suffix.lower() in (
+                ".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v",
+            )
+
+    def _export_play_along_video(
+        self,
+        video_src: str,
+        result: dict,
+        song_name: str,
+        final_dir: str,
+        time_range,
+    ):
+        """Mux the source video with the guitar-removed (or solo) audio track."""
+        if result.get("solo"):
+            audio, label, key = result["solo"], "solo", "solo_video"
+        elif result.get("no_guitar"):
+            audio, label, key = result["no_guitar"], "no_guitar", "no_guitar_video"
+        else:
+            self.log.emit("⚠ No backing track available to build the video")
+            return
+
+        subtitle = result.get("chords_srt")
+        if subtitle:
+            self.log.emit("   …burning detected chords onto the video")
+
+        self.log.emit(f"🎬 Building play-along video ({label}, guitar removed)…")
+        out_path = os.path.join(final_dir, f"{song_name}_{label}_video.mp4")
+        if self._mux_video(video_src, audio, out_path, time_range, subtitle):
+            result[key] = out_path
+            self.log.emit(f"✅ Play-along video saved: {out_path}")
+        else:
+            self.log.emit("⚠ Video export failed (ffmpeg) — backing audio still saved")
+
+    def _detect_chords(self, guitar_stem: str, result: dict, song_name: str, final_dir: str):
+        """Run chord detection on the isolated guitar and write a chord sheet."""
+        self.log.emit("🎼 Detecting chords on the guitar stem…")
+        try:
+            segments = detect_chords(guitar_stem)
+        except Exception as e:
+            self.log.emit(f"⚠ Chord detection failed: {e}")
+            return
+        if not segments:
+            self.log.emit("⚠ No chords detected (stem may be silent)")
+            return
+
+        txt = os.path.join(final_dir, f"{song_name}_chords.txt")
+        lrc = os.path.join(final_dir, f"{song_name}_chords.lrc")
+        srt = os.path.join(final_dir, f"{song_name}_chords.srt")
+        write_chords_txt(segments, txt, song_name)
+        write_chords_lrc(segments, lrc)
+        write_chords_srt(segments, srt)
+        result["chords"] = txt
+        result["chords_lrc"] = lrc
+        result["chords_srt"] = srt
+
+        named = [s for s in segments if s[2] != "N.C."]
+        self.log.emit(f"✅ Chords saved ({len(named)} changes): {txt}")
+
+    def _mux_video(
+        self,
+        video_src: str,
+        audio_wav: str,
+        out_path: str,
+        time_range,
+        subtitle_srt: str | None = None,
+    ) -> bool:
+        """
+        Combine the video stream of ``video_src`` with ``audio_wav``, optionally
+        burning the chord chart (``subtitle_srt``) onto the picture.
+
+        The backing audio is already trimmed to the chosen window, so when a
+        time range is set we trim the video to match (input-seek + re-encode for
+        frame-accurate sync). When neither trimming nor subtitle burn-in is
+        needed the video stream is copied as-is (fast, lossless).
+        """
+        ff = self._get_ffmpeg()
+        trimming = bool(time_range) and (time_range[0] > 0 or time_range[1] is not None)
+        # Subtitle times are output-relative (0-based), so they apply after the
+        # trim — chord timings line up with the trimmed audio.
+        burn = bool(subtitle_srt and os.path.isfile(subtitle_srt))
+        reencode = trimming or burn
+
+        cmd = [ff, "-y"]
+        if trimming:
+            start, end = time_range
+            cmd += ["-ss", str(start), "-i", video_src]
+            if end is not None:
+                cmd += ["-t", str(end - start)]
+        else:
+            cmd += ["-i", video_src]
+        cmd += ["-i", audio_wav, "-map", "0:v:0", "-map", "1:a:0"]
+
+        # Run ffmpeg from the subtitle's folder and reference it by bare filename
+        # so the libass `subtitles=` filter dodges Windows drive-colon escaping.
+        cwd = None
+        if burn:
+            cwd = os.path.dirname(subtitle_srt)
+            # Alignment uses legacy SSA numbering here (libass via force_style):
+            # 6 = top-centre. MarginV nudges it down from the very top edge.
+            style = "FontSize=26,Bold=1,PrimaryColour=&H0000FFFF,Alignment=6,MarginV=30"
+            vf = f"subtitles={os.path.basename(subtitle_srt)}:force_style='{style}'"
+            cmd += ["-vf", vf]
+
+        cmd += [
+            "-c:v", "libx264" if reencode else "copy",
+            "-c:a", "aac", "-b:a", "320k",
+            "-movflags", "+faststart",
+            "-shortest",
+            out_path,
+        ]
+        return self._run_cmd(cmd, "ffmpeg mux video", cwd=cwd).returncode == 0
 
     def _ffmpeg_convert(self, src: str, dst: str):
         cmd = [self._get_ffmpeg(), "-y", "-i", src, "-ar", str(SAMPLE_RATE), "-ac", "2", dst]
