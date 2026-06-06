@@ -212,6 +212,8 @@ class MainWindow(QMainWindow):
         self._settings["last_input_type"] = config.get("input_type", "youtube")
         self._settings["export_folder"] = config["export_folder"]
         self._settings["format"] = config.get("format", "wav")
+        self._settings["export_video"] = bool(config.get("export_video", False))
+        self._settings["detect_chords"] = bool(config.get("detect_chords", False))
         start_raw, end_raw = self.perfCard.get_time_range_raw()
         self._settings["last_time_range_start"] = start_raw
         self._settings["last_time_range_end"] = end_raw
