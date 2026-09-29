@@ -2,10 +2,14 @@
 Built-in audio player.
 
 What a guitar player actually wants after extraction:
-    • Switch between *isolated guitar*, *no-guitar backing*, and (optionally) *solo mix*
+    • Switch between any exported track (guitar / drums / bass / vocals / piano /
+      other / no-guitar backing / solo mix / crowd / reverb)
     • Loop a chunk of the track to practise over
     • Slow it down to transcribe or learn by ear (Qt native playback rate)
     • Scrub the timeline
+
+The track buttons are built dynamically from whatever the pipeline produced, so
+the player only ever shows tracks that actually exist on disk.
 
 This card stays invisible until the pipeline finishes and hands it a set of files.
 """
@@ -16,8 +20,8 @@ import os
 from PySide6.QtCore import Qt, Signal, QUrl, QTimer
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSlider, QFrame, QSizePolicy, QButtonGroup,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
+    QSlider, QSizePolicy, QButtonGroup,
 )
 
 from pipeline.chords import parse_lrc
@@ -25,23 +29,42 @@ from utils.translations import get_text
 
 
 class PlayerCard(QWidget):
-    """A/B/C track player with loop + tempo controls."""
+    """Multi-track player with loop + tempo controls."""
 
     open_folder_requested = Signal(str)
 
     TEMPO_MIN = 50    # 0.50x
     TEMPO_MAX = 150   # 1.50x
 
+    # (result key → translation key), in display order. Only keys present in the
+    # pipeline result get a button — everything else (folder, chords, video) is
+    # ignored, so this doubles as the audio-track whitelist.
+    TRACK_ORDER = (
+        ("guitar", "player_guitar"),
+        ("no_guitar", "player_backing"),
+        ("solo", "player_solo"),
+        ("drums", "player_drums"),
+        ("bass", "player_bass"),
+        ("vocals", "player_vocals"),
+        ("piano", "player_piano"),
+        ("other", "player_other"),
+        ("crowd", "player_crowd"),
+        ("reverb_echo", "player_reverb"),
+        ("dry", "player_dry"),
+        ("clean", "player_clean"),
+    )
+    BTNS_PER_ROW = 5
+
     def __init__(self, lang: str = "en", parent=None):
         super().__init__(parent)
         self.lang = lang
-        self._all_tracks: dict[str, str] = {}     # full set (incl. *_dry, *_clean, *_reverb, *_crowd)
-        self._tracks: dict[str, str] = {}         # active 3 buttons map → path
+        self._tracks: dict[str, str] = {}         # active key → path
+        self._track_buttons: dict[str, QPushButton] = {}
         self._current_key: str | None = None
+        self._folder = ""
         self._loop_a_ms: int | None = None
         self._loop_b_ms: int | None = None
         self._user_seeking = False
-        self._prefer_clean = True
         self._chords: list[tuple[float, str]] = []  # (start_seconds, label)
 
         self._player = QMediaPlayer(self)
@@ -60,15 +83,16 @@ class PlayerCard(QWidget):
 
     # ── Public API ────────────────────────────────────────────────────────
     def set_tracks(self, tracks: dict):
-        """
-        Accepts the worker's full result dict. Picks per-button paths preferring
-        cleaned variants (``*_dry``, ``*_clean``) when ``prefer_clean`` is on.
-        """
-        self._all_tracks = {k: v for k, v in tracks.items() if v and k != "folder"}
+        """Accepts the worker's full result dict and builds a button per track."""
         self._folder = tracks.get("folder", "")
         self._load_chords(tracks.get("chords_lrc"))
+        # Keep only known audio tracks that actually exist on disk.
+        self._tracks = {
+            key: tracks[key]
+            for key, _t in self.TRACK_ORDER
+            if tracks.get(key) and os.path.isfile(tracks[key])
+        }
         self._refresh_buttons()
-        self.cleanToggle.setVisible(self._has_any_cleaned())
 
     def _load_chords(self, lrc_path):
         raw = parse_lrc(lrc_path) if lrc_path and os.path.isfile(lrc_path) else []
@@ -76,38 +100,34 @@ class PlayerCard(QWidget):
         self.chordRow.setVisible(bool(self._chords))
         self._update_chord_label(self._player.position())
 
-    def _has_any_cleaned(self) -> bool:
-        return any(
-            k.endswith(("_dry", "_clean")) for k in self._all_tracks
-        )
+    def _rebuild_track_buttons(self):
+        """Tear down and recreate the track-switcher buttons for current tracks."""
+        for btn in self._track_buttons.values():
+            self._track_group.removeButton(btn)
+            btn.setParent(None)
+            btn.deleteLater()
+        self._track_buttons = {}
 
-    def _resolve(self, base: str) -> str | None:
-        """Pick best path for ``base`` (guitar / no_guitar / solo)."""
-        if self._prefer_clean:
-            # Prefer fully cleaned (dry+clean) → dry → clean → raw.
-            for suffix in ("_dry_clean", "_clean_dry", "_dry", "_clean"):
-                p = self._all_tracks.get(base + suffix)
-                if p:
-                    return p
-        return self._all_tracks.get(base)
+        idx = 0
+        for key, tkey in self.TRACK_ORDER:
+            if key not in self._tracks:
+                continue
+            btn = QPushButton(get_text(self.lang, tkey))
+            btn.setObjectName("trackBtn")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _checked=False, k=key: self._select_track(k))
+            self._track_group.addButton(btn)
+            self._tracks_grid.addWidget(btn, idx // self.BTNS_PER_ROW, idx % self.BTNS_PER_ROW)
+            self._track_buttons[key] = btn
+            idx += 1
 
     def _refresh_buttons(self):
-        self._tracks = {}
-        for key in ("guitar", "no_guitar", "solo"):
-            p = self._resolve(key)
-            if p:
-                self._tracks[key] = p
-
+        self._rebuild_track_buttons()
         has_any = bool(self._tracks)
         self.setVisible(has_any)
         if not has_any:
             return
-
-        self.btnGuitar.setEnabled("guitar" in self._tracks)
-        self.btnBacking.setEnabled("no_guitar" in self._tracks)
-        self.btnSolo.setEnabled("solo" in self._tracks)
-
-        # Keep current button if still valid; otherwise pick first.
+        # Keep the current selection if still valid; otherwise pick the first.
         if self._current_key not in self._tracks:
             self._current_key = next(iter(self._tracks))
         self._select_track(self._current_key)
@@ -115,9 +135,10 @@ class PlayerCard(QWidget):
     def retranslate(self, lang: str):
         self.lang = lang
         self.titleLabel.setText("🎧  " + get_text(lang, "section_player"))
-        self.btnGuitar.setText(get_text(lang, "player_guitar"))
-        self.btnBacking.setText(get_text(lang, "player_backing"))
-        self.btnSolo.setText(get_text(lang, "player_solo"))
+        for key, tkey in self.TRACK_ORDER:
+            btn = self._track_buttons.get(key)
+            if btn:
+                btn.setText(get_text(lang, tkey))
         self.chordCaption.setText("🎼  " + get_text(lang, "chord_now"))
         self.tempoLabel.setText(get_text(lang, "tempo"))
         self.volumeLabel.setText(get_text(lang, "volume"))
@@ -157,34 +178,23 @@ class PlayerCard(QWidget):
         root.addWidget(self.chordRow)
         self.chordRow.setVisible(False)
 
-        # Track switcher
-        track_row = QHBoxLayout()
-        track_row.setSpacing(8)
+        # Track switcher — dynamic grid of track buttons + open-folder button.
         self._track_group = QButtonGroup(self)
         self._track_group.setExclusive(True)
 
-        self.btnGuitar = self._make_track_btn("guitar")
-        self.btnBacking = self._make_track_btn("no_guitar")
-        self.btnSolo = self._make_track_btn("solo")
-        for b in (self.btnGuitar, self.btnBacking, self.btnSolo):
-            self._track_group.addButton(b)
-            track_row.addWidget(b)
-        track_row.addStretch()
-
-        self.cleanToggle = QPushButton("✨")
-        self.cleanToggle.setObjectName("smallButton")
-        self.cleanToggle.setCheckable(True)
-        self.cleanToggle.setChecked(True)
-        self.cleanToggle.setToolTip("Use cleaned (de-reverb / de-crowd) variant when available")
-        self.cleanToggle.toggled.connect(self._on_clean_toggle)
-        self.cleanToggle.setVisible(False)
-        track_row.addWidget(self.cleanToggle)
+        switch_row = QHBoxLayout()
+        switch_row.setSpacing(8)
+        self._tracks_grid = QGridLayout()
+        self._tracks_grid.setHorizontalSpacing(8)
+        self._tracks_grid.setVerticalSpacing(6)
+        switch_row.addLayout(self._tracks_grid)
+        switch_row.addStretch()
 
         self.openFolderBtn = QPushButton()
         self.openFolderBtn.setObjectName("smallButton")
         self.openFolderBtn.clicked.connect(self._open_folder)
-        track_row.addWidget(self.openFolderBtn)
-        root.addLayout(track_row)
+        switch_row.addWidget(self.openFolderBtn, 0, Qt.AlignTop)
+        root.addLayout(switch_row)
 
         # Transport: play button + time labels + seek
         transport = QHBoxLayout()
@@ -282,13 +292,6 @@ class PlayerCard(QWidget):
 
         root.addLayout(knobs)
 
-    def _make_track_btn(self, key: str) -> QPushButton:
-        btn = QPushButton()
-        btn.setObjectName("trackBtn")
-        btn.setCheckable(True)
-        btn.clicked.connect(lambda checked=False, k=key: self._select_track(k))
-        return btn
-
     # ── Player wiring ─────────────────────────────────────────────────────
     def _wire_player(self):
         self._player.durationChanged.connect(self._on_duration_changed)
@@ -306,15 +309,14 @@ class PlayerCard(QWidget):
         self._player.stop()
         self._player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
 
-        for k, btn in (
-            ("guitar", self.btnGuitar),
-            ("no_guitar", self.btnBacking),
-            ("solo", self.btnSolo),
-        ):
-            btn.setProperty("selected", "true" if k == key else "false")
+        for k, btn in self._track_buttons.items():
+            selected = k == key
+            btn.setProperty("selected", "true" if selected else "false")
             btn.style().unpolish(btn); btn.style().polish(btn)
-            btn.setChecked(k == key)
+            btn.setChecked(selected)
 
+        # All tracks derive from the same (trimmed) source, so they share a
+        # duration — preserving the play-head across switches stays in sync.
         if pos > 0:
             self._player.setPosition(pos)
         if resume:
@@ -404,10 +406,6 @@ class PlayerCard(QWidget):
         rate = v / 100.0
         self.tempoValue.setText(f"{rate:.2f}×")
         self._player.setPlaybackRate(rate)
-
-    def _on_clean_toggle(self, checked: bool):
-        self._prefer_clean = checked
-        self._refresh_buttons()
 
     # ── Misc ──────────────────────────────────────────────────────────────
     def _open_folder(self):

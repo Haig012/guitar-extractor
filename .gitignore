@@ -32,3 +32,22 @@ Thumbs.db
 # Junk captured from pip redirects
 6.6.0
 git
+
+# Node / Electron tooling (not part of this app)
+node_modules/
+
+# Separate karaoke-extractor prototype (Electron + FastAPI) — kept local, not part of this repo
+app/
+backend/
+frontend/
+shared/
+package.json
+package-lock.json
+tsconfig.json
+ARCHITECTURE.md
+
+# Runtime folders the app creates
+logs/
+output/
+temp/
+models/

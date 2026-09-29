@@ -1,26 +1,37 @@
 # Guitar Extractor — Python dependencies
-# Install with: pip install -r requirements.txt
+#
+# Easiest: double-click install_dependencies.bat (makes a .venv here, picks the
+# CUDA build of PyTorch if you have an NVIDIA GPU, and checks for FFmpeg).
+# Manual:  pip install -r requirements.txt   (Python 3.10–3.12)
+#
+# Versions are pinned to a combination known to work together. PyTorch 2.5 has
+# no wheels for Python 3.13+, and newer torchaudio releases changed audio I/O in
+# a way Demucs 4.0.1 does not handle.
 
 # GUI framework
-PySide6>=6.6.0
+PySide6>=6.6.0,<7
 
-# YouTube downloader
+# YouTube downloader — deliberately not capped: YouTube changes often and old
+# yt-dlp versions stop working. Update any time with: pip install -U yt-dlp
 yt-dlp>=2024.1.0
 
-# Stem separation (installs torch + torchaudio automatically)
-demucs>=4.0.0
+# Stem separation. From PyPI this is the CPU build of PyTorch on Windows;
+# the installer swaps in the CUDA build (cu121) when an NVIDIA GPU is present.
+torch==2.5.1
+torchaudio==2.5.1
+demucs==4.0.1
 
-# Audio I/O (required WAV backend for torchaudio on Windows)
+# Audio I/O (WAV backend for torchaudio on Windows)
 soundfile>=0.12.1
 
-# Audio analysis (load / resample / time-stretch via phase vocoder)
-librosa>=0.10.1
-numpy>=1.24.0
+# Audio analysis (load / resample / time-stretch, chord detection)
+librosa>=0.10.1,<0.12
+numpy>=1.24
 
-# UVR post-processing (de-reverb / de-crowd) — optional but recommended.
-# Use [gpu] for CUDA, swap to [cpu] if you have no NVIDIA GPU.
-audio-separator[gpu]>=0.28.0
+# UVR cleanup (de-reverb / de-crowd) — optional feature, CPU ONNX runtime so it
+# installs on any machine. The UVR model files themselves are a separate
+# download (see README → Optional UVR models).
+audio-separator[cpu]>=0.28.0,<0.45
 
-# ffmpeg must be installed separately:
-#   Windows: winget install Gyan.FFmpeg
-#   Or download from: https://ffmpeg.org/download.html
+# FFmpeg is NOT a pip package — install it separately:
+#   winget install Gyan.FFmpeg      (or https://ffmpeg.org/download.html)

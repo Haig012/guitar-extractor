@@ -149,6 +149,19 @@ class PipelineWorker(QThread):
                     wav_path = seg_path
                     temp_files.append(wav_path)
 
+            # Guard: a fully-silent input makes Demucs crash deep inside with a
+            # cryptic reflect-pad AssertionError. Catch it here and explain.
+            peak = self._peak_level(wav_path)
+            if peak < 1e-3:  # ≈ -60 dBFS across the whole file → effectively silent
+                self.error.emit(
+                    "The input audio is silent — no signal was detected.",
+                    "The source file/download contains no real audio (it decodes "
+                    "to silence). Check the file plays sound, or try re-downloading "
+                    "it from a different source.",
+                )
+                return
+            self.log.emit(f"🔊 Audio level OK (peak {_dbfs(peak):.1f} dBFS)")
+
             self.progress.emit(28)
             if self._cancelled:
                 return
@@ -178,23 +191,29 @@ class PipelineWorker(QThread):
 
             solo_enabled = cfg.get("solo_time_enabled", False)
             solo_segments = cfg.get("solo_time_segments", []) or []
-            result: dict[str, str | None] = {
-                "folder": final_dir,
-                "guitar": None,
-                "no_guitar": None,
-                "solo": None,
-            }
+            # User-chosen stems; default to guitar so old configs keep working.
+            export_stems = cfg.get("export_stems") or ["guitar"]
+            export_backing = bool(cfg.get("export_backing", True))
+            result: dict[str, str | None] = {"folder": final_dir}
 
+            # Solo mix is orthogonal to stem selection — produce it if asked.
             if solo_enabled and solo_segments:
                 result["solo"] = self._export_solo_mix(
                     stems, solo_segments, time_range, song_name, final_dir,
                 )
-            else:
-                guitar_path = os.path.join(final_dir, f"{song_name}_guitar.wav")
-                shutil.copy2(stems["guitar"], guitar_path)
-                self.log.emit(f"✅ Guitar stem saved: {guitar_path}")
-                result["guitar"] = guitar_path
 
+            # Each individual stem the user ticked.
+            for stem in export_stems:
+                src = stems.get(stem)
+                if not src:
+                    continue
+                dst = os.path.join(final_dir, f"{song_name}_{stem}.wav")
+                shutil.copy2(src, dst)
+                result[stem] = dst
+                self.log.emit(f"✅ {stem.capitalize()} stem saved: {dst}")
+
+            # Backing mix = drums + bass + vocals + piano + other (guitar removed).
+            if export_backing:
                 no_guitar_path = os.path.join(final_dir, f"{song_name}_no_guitar.wav")
                 self.log.emit("Mixing no-guitar backing track…")
                 if self._ffmpeg_sum_stems(
@@ -221,7 +240,9 @@ class PipelineWorker(QThread):
                 return
 
             # ── Step 5 — optional UVR post-processing ────────────────
-            self._run_uvr_post(cfg, result, song_name, final_dir, tmp_dir, use_gpu)
+            # wav_path = the full converted/trimmed mix; UVR pulls reverb /
+            # crowd out of it into standalone tracks.
+            self._run_uvr_post(cfg, result, song_name, final_dir, tmp_dir, use_gpu, wav_path)
 
             self.progress.emit(95)
 
@@ -254,7 +275,14 @@ class PipelineWorker(QThread):
         final_dir: str,
         tmp_dir: str,
         use_gpu: bool,
+        source_mix: str,
     ):
+        """
+        Pull reverb / crowd out of the *full mix* into their own tracks.
+
+        De-reverb yields ``_reverb_echo`` (the wet tail) + ``_no_reverb`` (dry).
+        De-crowd yields ``_crowd`` (the audience) + ``_no_crowd`` (clean).
+        """
         do_dereverb = bool(cfg.get("remove_reverb", False))
         do_decrowd = bool(cfg.get("remove_crowd", False))
         if not (do_dereverb or do_decrowd):
@@ -265,7 +293,7 @@ class PipelineWorker(QThread):
             self.log.emit("   → Install with: pip install audio-separator[gpu]")
             return
 
-        self._emit_step(5, "UVR post-processing…")
+        self._emit_step(5, "UVR — extracting reverb / crowd tracks…")
         uvr_tmp = os.path.join(tmp_dir, "uvr")
         ensure_dir(uvr_tmp)
 
@@ -279,48 +307,42 @@ class PipelineWorker(QThread):
             ffmpeg_path=ffmpeg_path if ffmpeg_path != "ffmpeg" else None,
         )
 
-        # Process each output track that exists.
-        track_specs = [
-            ("guitar",    "guitar"),
-            ("no_guitar", "backing"),
-            ("solo",      "solo"),
-        ]
-
-        for key, label in track_specs:
-            src = result.get(key)
-            if not src:
-                continue
-
-            if do_dereverb and model_present(DEREVERB_MODEL):
-                self.log.emit(f"De-reverb on {label}…")
-                dry, reverb = uvr.dereverb(src, uvr_tmp)
-                if dry:
-                    dst = os.path.join(final_dir, f"{song_name}_{label}_dry.wav")
-                    shutil.copy2(dry, dst)
-                    result[f"{key}_dry"] = dst
-                    self.log.emit(f"✅ {dst}")
+        if do_dereverb:
+            if model_present(DEREVERB_MODEL):
+                self.log.emit("Extracting reverb / echo from the full mix…")
+                dry, reverb = uvr.dereverb(source_mix, uvr_tmp)
                 if reverb:
-                    dst = os.path.join(final_dir, f"{song_name}_{label}_reverb_echo.wav")
+                    dst = os.path.join(final_dir, f"{song_name}_reverb_echo.wav")
                     shutil.copy2(reverb, dst)
-                    result[f"{key}_reverb_echo"] = dst
+                    result["reverb_echo"] = dst
                     self.log.emit(f"✅ {dst}")
-            elif do_dereverb:
+                if dry:
+                    dst = os.path.join(final_dir, f"{song_name}_no_reverb.wav")
+                    shutil.copy2(dry, dst)
+                    result["dry"] = dst
+                    self.log.emit(f"✅ {dst}")
+                if not (reverb or dry):
+                    self.log.emit("⚠ De-reverb produced no output (see log above)")
+            else:
                 self.log.emit(f"⚠ De-reverb requested but {DEREVERB_MODEL} is missing")
 
-            if do_decrowd and model_present(CROWD_MODEL):
-                self.log.emit(f"De-crowd on {label}…")
-                clean, crowd = uvr.decrowd(src, uvr_tmp)
-                if clean:
-                    dst = os.path.join(final_dir, f"{song_name}_{label}_clean.wav")
-                    shutil.copy2(clean, dst)
-                    result[f"{key}_clean"] = dst
-                    self.log.emit(f"✅ {dst}")
+        if do_decrowd:
+            if model_present(CROWD_MODEL):
+                self.log.emit("Extracting crowd noise from the full mix…")
+                clean, crowd = uvr.decrowd(source_mix, uvr_tmp)
                 if crowd:
-                    dst = os.path.join(final_dir, f"{song_name}_{label}_crowd.wav")
+                    dst = os.path.join(final_dir, f"{song_name}_crowd.wav")
                     shutil.copy2(crowd, dst)
-                    result[f"{key}_crowd"] = dst
+                    result["crowd"] = dst
                     self.log.emit(f"✅ {dst}")
-            elif do_decrowd:
+                if clean:
+                    dst = os.path.join(final_dir, f"{song_name}_no_crowd.wav")
+                    shutil.copy2(clean, dst)
+                    result["clean"] = dst
+                    self.log.emit(f"✅ {dst}")
+                if not (crowd or clean):
+                    self.log.emit("⚠ De-crowd produced no output (see log above)")
+            else:
                 self.log.emit(f"⚠ De-crowd requested but {CROWD_MODEL} is missing")
 
     # ── Solo-time export ──────────────────────────────────────────────────
@@ -434,7 +456,7 @@ class PipelineWorker(QThread):
         template = os.path.join(out_dir, "%(title).200B.%(ext)s")
         fallback = os.path.join(out_dir, "%(id)s.%(ext)s")
         cmd = [
-            "yt-dlp", "-f", "bestaudio", "-x",
+            *_YTDLP, "-f", "bestaudio", "-x",
             "--audio-format", "wav" if fmt == "wav" else fmt,
             "--audio-quality", "0",
             "-o", template,
@@ -485,7 +507,7 @@ class PipelineWorker(QThread):
         """Download the merged video (bestvideo+bestaudio → mp4) for play-along export."""
         template = os.path.join(out_dir, "video_%(id)s.%(ext)s")
         cmd = [
-            "yt-dlp", "-f", "bv*+ba/b", "--merge-output-format", "mp4",
+            *_YTDLP, "-f", "bv*+ba/b", "--merge-output-format", "mp4",
             "-o", template,
             "--restrict-filenames", "--no-playlist", "--no-warnings",
         ]
@@ -697,6 +719,22 @@ class PipelineWorker(QThread):
         ]
         return self._run_cmd(cmd, "ffmpeg mix").returncode == 0
 
+    def _peak_level(self, wav_path: str) -> float:
+        """Largest absolute sample across the file (block-scanned to stay light)."""
+        try:
+            peak = 0.0
+            with sf.SoundFile(wav_path) as f:
+                for block in f.blocks(blocksize=1 << 20, dtype="float32"):
+                    if block.size:
+                        p = float(np.max(np.abs(block)))
+                        if p > peak:
+                            peak = p
+            return peak
+        except Exception as e:
+            # Never let the silence check itself break a run — assume audible.
+            self.log.emit(f"⚠ Could not measure audio level ({e}); continuing")
+            return 1.0
+
     def _find_stem(self, search_dir: str, stem_name: str) -> str | None:
         pat = re.compile(rf"(^|_){re.escape(stem_name)}\.(wav|mp3|flac)$", re.IGNORECASE)
         for root, _d, files in os.walk(search_dir):
@@ -709,6 +747,12 @@ class PipelineWorker(QThread):
                 if pat.search(fl):
                     return os.path.join(root, f)
         return None
+
+
+# yt-dlp through this interpreter, not a bare "yt-dlp" on PATH: it is a pip
+# dependency of this environment, so it is always there when the app is —
+# whichever venv or Python launched it (same as demucs above).
+_YTDLP = [sys.executable, "-m", "yt_dlp"]
 
 
 def _find_ffmpeg() -> str | None:
@@ -764,6 +808,12 @@ def _find_ffmpeg() -> str | None:
         pass
 
     return None
+
+
+def _dbfs(peak: float) -> float:
+    """Linear peak (0–1) → dBFS, floored so silence doesn't log -inf."""
+    import math
+    return 20 * math.log10(max(peak, 1e-9))
 
 
 def _fmt_time(seconds: int) -> str:

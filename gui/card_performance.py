@@ -64,6 +64,8 @@ class PerformanceCard(QWidget):
     input_changed = Signal()
 
     FORMATS = ("wav", "mp3", "m4a", "webm", "opus")
+    # The six stems htdemucs_6s produces, in display order.
+    STEM_KEYS = ("guitar", "drums", "bass", "vocals", "piano", "other")
 
     def __init__(self, lang: str = "en", settings: dict | None = None, parent=None):
         super().__init__(parent)
@@ -74,6 +76,9 @@ class PerformanceCard(QWidget):
         self._detect_chords = bool(self.settings.get("detect_chords", False))
         self._remove_reverb = bool(self.settings.get("remove_reverb", False))
         self._remove_crowd = bool(self.settings.get("remove_crowd", False))
+        saved_stems = self.settings.get("export_stems", ["guitar"])
+        self._saved_stems = set(saved_stems if isinstance(saved_stems, list) else ["guitar"])
+        self._export_backing = bool(self.settings.get("export_backing", True))
         self._solo_segments: list[dict] = []
         self._build_ui()
         self.retranslate(lang)
@@ -180,6 +185,32 @@ class PerformanceCard(QWidget):
         fmt_row.addStretch()
         layout.addLayout(fmt_row)
         self._select_format(self._selected_format)
+
+        # ── Tracks to export ──────────────────────────────
+        self.tracksLabel = self._section_label()
+        layout.addWidget(self.tracksLabel)
+        self.tracksHint = QLabel()
+        self.tracksHint.setObjectName("hint")
+        self.tracksHint.setWordWrap(True)
+        layout.addWidget(self.tracksHint)
+
+        from PySide6.QtWidgets import QGridLayout
+        tracks_grid = QGridLayout()
+        tracks_grid.setHorizontalSpacing(18)
+        tracks_grid.setVerticalSpacing(6)
+        self._stem_checks: dict[str, QCheckBox] = {}
+        # 6 stems + the backing mix, laid out 4 per row.
+        cells = list(self.STEM_KEYS) + ["backing"]
+        for i, key in enumerate(cells):
+            cb = QCheckBox()
+            if key == "backing":
+                cb.setChecked(self._export_backing)
+            else:
+                cb.setChecked(key in self._saved_stems)
+            cb.toggled.connect(self._on_input_changed)
+            self._stem_checks[key] = cb
+            tracks_grid.addWidget(cb, i // 4, i % 4)
+        layout.addLayout(tracks_grid)
 
         # ── Play-along video ──────────────────────────────
         self.exportVideoCheckbox = QCheckBox()
@@ -314,6 +345,16 @@ class PerformanceCard(QWidget):
         if not self._validate_input():
             return
 
+        export_stems = [k for k in self.STEM_KEYS if self._stem_checks[k].isChecked()]
+        export_backing = self._stem_checks["backing"].isChecked()
+        solo_on = self.soloCheckbox.isChecked()
+        if not export_stems and not export_backing and not solo_on:
+            QMessageBox.warning(
+                self, get_text(self.lang, "section_tracks"),
+                get_text(self.lang, "error_no_tracks"),
+            )
+            return
+
         time_range = None
         start_raw = self.timeStartEdit.text().strip()
         end_raw = self.timeEndEdit.text().strip()
@@ -358,6 +399,8 @@ class PerformanceCard(QWidget):
                 else self.fileEdit.text().strip()
             ),
             "format": self._selected_format,
+            "export_stems": export_stems,
+            "export_backing": export_backing,
             "export_video": self.exportVideoCheckbox.isChecked(),
             "detect_chords": self.detectChordsCheckbox.isChecked(),
             "clean_temp": True,
@@ -418,6 +461,7 @@ class PerformanceCard(QWidget):
             self.removeReverbCheckbox, self.removeCrowdCheckbox,
             self.exportVideoCheckbox, self.detectChordsCheckbox,
             *self._format_buttons.values(),
+            *self._stem_checks.values(),
         ):
             w.setEnabled(not processing)
         if not processing:
@@ -441,6 +485,10 @@ class PerformanceCard(QWidget):
         self.timeStartEdit.setPlaceholderText(t("time_start"))
         self.timeEndEdit.setPlaceholderText(t("time_end"))
         self.outputLabel.setText(t("output_format"))
+        self.tracksLabel.setText(t("section_tracks"))
+        self.tracksHint.setText(t("tracks_hint"))
+        for key, cb in self._stem_checks.items():
+            cb.setText(t("track_backing") if key == "backing" else t(f"track_{key}"))
         self.exportVideoCheckbox.setText("🎬  " + t("export_video"))
         self.exportVideoHint.setText(t("export_video_hint"))
         self.detectChordsCheckbox.setText("🎼  " + t("detect_chords"))

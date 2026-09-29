@@ -219,6 +219,8 @@ class MainWindow(QMainWindow):
         self._settings["last_time_range_end"] = end_raw
         self._settings["remove_reverb"] = bool(config.get("remove_reverb", False))
         self._settings["remove_crowd"] = bool(config.get("remove_crowd", False))
+        self._settings["export_stems"] = list(config.get("export_stems", ["guitar"]))
+        self._settings["export_backing"] = bool(config.get("export_backing", True))
         settings_mgr.save_settings(self._settings)
 
     def _on_cancel(self):

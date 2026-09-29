@@ -20,6 +20,8 @@ DEFAULTS: dict = {
     "last_time_range_end": "",
     "remove_reverb": False,
     "remove_crowd": False,
+    "export_stems": ["guitar"],
+    "export_backing": True,
 }
 
 

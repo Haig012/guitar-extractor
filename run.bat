@@ -1,23 +1,29 @@
 @echo off
+setlocal
 title Guitar Extractor - Made by Hai Guriel
 cd /d "%~dp0"
 
-REM Use an existing Python venv that has GPU torch + demucs + yt-dlp.
-set "VENV=C:\path\to\your\venv"
+REM Python to use: GUITAR_EXTRACTOR_PYTHON if you set one, else the .venv that
+REM install_dependencies.bat creates in this folder.
+if defined GUITAR_EXTRACTOR_PYTHON (
+    set "PYEXE=%GUITAR_EXTRACTOR_PYTHON%"
+) else (
+    set "PYEXE=%~dp0.venv\Scripts\python.exe"
+)
 
-if not exist "%VENV%\Scripts\python.exe" (
-    echo ERROR: Expected Python venv not found at "%VENV%".
-    echo Edit run.bat and point VENV at a Python env that has demucs, torch and yt-dlp.
+if not exist "%PYEXE%" (
+    echo Guitar Extractor is not set up yet.
+    echo Double-click install_dependencies.bat first ^(one time^), then run this again.
     pause
     exit /b 1
 )
 
-REM Put the venv Scripts on PATH so the bare "yt-dlp" call resolves.
-set "PATH=%VENV%\Scripts;%PATH%"
+REM Put that environment's Scripts folder first on PATH for any helper tools.
+for %%P in ("%PYEXE%") do set "PATH=%%~dpP;%PATH%"
 
-"%VENV%\Scripts\python.exe" main.py
+"%PYEXE%" main.py
 if errorlevel 1 (
     echo.
-    echo Application exited with an error.
+    echo The app exited with an error - see the message above.
     pause
 )
