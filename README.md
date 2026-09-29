@@ -47,25 +47,44 @@ a solo down and pick it apart, and a **live chord display** that shows the curre
 
 ---
 
-## Quick start
+## Quick start (Windows)
 
-1. Install **Python 3.10+** (tick *Add Python to PATH* in the installer).
-2. Install **FFmpeg**:
+1. **Install Python 3.11** (3.10 and 3.12 also work — **3.13+ does not yet**, PyTorch has no builds for it):
    ```powershell
-   winget install Gyan.FFmpeg
+   winget install Python.Python.3.11
    ```
-3. Install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-   — or double-click `install_dependencies.bat`.
-4. Run:
-   ```bash
-   python main.py
-   ```
-   — or double-click `run.bat`.
+   or download it from [python.org](https://www.python.org/downloads/release/python-3119/) and tick *Add python.exe to PATH*.
+2. **Download this repo** — *Code → Download ZIP* and unzip it, or `git clone https://github.com/Haig012/guitar-extractor.git`.
+3. **Double-click `install_dependencies.bat`** (one time). It:
+   - creates a private Python environment in the app folder (`.venv`) — nothing touches your system Python,
+   - installs the **CUDA (GPU) build of PyTorch** if you have an NVIDIA card, the CPU build otherwise,
+   - installs everything in `requirements.txt`,
+   - checks for **FFmpeg** and offers to install it (`winget install Gyan.FFmpeg`).
+4. **Double-click `run.bat`** to start the app.
 
-First run will download the Demucs `htdemucs_6s` weights (~350 MB) once.
+The first extraction downloads the Demucs `htdemucs_6s` model (~80 MB) once.
+With a GPU a song takes about a minute; on CPU it works, just several times slower.
+
+<details>
+<summary>Manual install (any shell)</summary>
+
+```bash
+python -m venv .venv
+.venv\Scriptsctivate
+# NVIDIA GPU only — the CUDA build of PyTorch first:
+pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements.txt
+python main.py
+```
+
+To run with a Python environment of your own, set `GUITAR_EXTRACTOR_PYTHON` to its `python.exe` before `run.bat`.
+</details>
+
+### Troubleshooting
+
+- **"yt-dlp failed to download"** — YouTube changes often; update it: `.venv\Scripts\python -m pip install -U yt-dlp`.
+- **"FFmpeg is missing"** — `winget install Gyan.FFmpeg`, then restart the app.
+- **Setup says Python was not found** — install Python 3.11 (step 1); 3.13+ is not supported yet.
 
 ---
 
@@ -82,7 +101,7 @@ First run will download the Demucs `htdemucs_6s` weights (~350 MB) once.
 | 7 | UVR (`audio-separator`) | *Optional* — de-reverb / de-crowd each output track              |
 
 Output lands in a **per-song subfolder** under your export root —
-`<export_folder>/<song name>/` (the default export root is `Desktop\Backing Tracks`).
+`<export_folder>/<song name>/` (the default export root is `Desktop\exported_files`; change it in the app).
 With both UVR boxes ticked you'll also get `_dry.wav`, `_reverb_echo.wav`,
 `_clean.wav`, and `_crowd.wav` variants for every track. The reverb-echo and crowd
 files are the *isolated residuals* — exactly what got removed — so they can be
