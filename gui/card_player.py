@@ -10,28 +10,79 @@ What a guitar player actually wants after extraction:
 
 The track buttons are built dynamically from whatever the pipeline produced, so
 the player only ever shows tracks that actually exist on disk.
-
-This card stays invisible until the pipeline finishes and hands it a set of files.
 """
 from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt, Signal, QUrl, QTimer
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtCore import Qt, Signal, QRect, QUrl, QTimer
+from PySide6.QtGui import QColor, QFontMetrics, QPainter
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QSlider, QSizePolicy, QButtonGroup,
+    QButtonGroup, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QStyle,
+    QVBoxLayout, QWidget,
 )
 
+from gui.icons import align_to_language, icon
+from gui.styles import COLORS
 from pipeline.chords import parse_lrc
 from utils.translations import get_text
+
+
+class _SeekSlider(QSlider):
+    """Timeline: click anywhere to jump, and the A–B loop is drawn on the groove."""
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self._loop: tuple[int | None, int | None] = (None, None)
+
+    def set_loop(self, a: int | None, b: int | None):
+        self._loop = (a, b)
+        self.update()
+
+    def _x_for(self, value: int) -> int:
+        handle = 12  # matches the QSS handle width
+        span = self.width() - handle
+        x = QStyle.sliderPositionFromValue(self.minimum(), self.maximum(), value, span)
+        return x + handle // 2
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self.maximum() > 0:
+            value = QStyle.sliderValueFromPosition(
+                self.minimum(), self.maximum(), int(ev.position().x()), self.width(),
+            )
+            self.setValue(value)
+            self.sliderMoved.emit(value)
+        super().mousePressEvent(ev)
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        a, b = self._loop
+        if self.maximum() <= 0 or (a is None and b is None):
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        color = QColor(COLORS["ok"])
+        mid = self.height() // 2
+        if a is not None and b is not None and b > a:
+            band = QColor(color)
+            band.setAlpha(150)
+            x1, x2 = self._x_for(a), self._x_for(b)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(band)
+            painter.drawRect(QRect(x1, mid - 3, x2 - x1, 6))
+        painter.setPen(color)
+        for point in (a, b):
+            if point is not None:
+                x = self._x_for(point)
+                painter.drawLine(x, mid - 7, x, mid + 7)
 
 
 class PlayerCard(QWidget):
     """Multi-track player with loop + tempo controls."""
 
     open_folder_requested = Signal(str)
+    show_log_requested = Signal()
 
     TEMPO_MIN = 50    # 0.50x
     TEMPO_MAX = 150   # 1.50x
@@ -53,7 +104,7 @@ class PlayerCard(QWidget):
         ("dry", "player_dry"),
         ("clean", "player_clean"),
     )
-    BTNS_PER_ROW = 5
+    BTNS_PER_ROW = 4
 
     def __init__(self, lang: str = "en", parent=None):
         super().__init__(parent)
@@ -66,6 +117,8 @@ class PlayerCard(QWidget):
         self._loop_b_ms: int | None = None
         self._user_seeking = False
         self._chords: list[tuple[float, str]] = []  # (start_seconds, label)
+        # Where to resume once a newly selected track has finished loading.
+        self._pending: tuple[int, bool] | None = None
 
         self._player = QMediaPlayer(self)
         self._audio_out = QAudioOutput(self)
@@ -82,6 +135,10 @@ class PlayerCard(QWidget):
         self.set_tracks({})
 
     # ── Public API ────────────────────────────────────────────────────────
+    @property
+    def has_tracks(self) -> bool:
+        return bool(self._tracks)
+
     def set_tracks(self, tracks: dict):
         """Accepts the worker's full result dict and builds a button per track."""
         self._folder = tracks.get("folder", "")
@@ -92,7 +149,21 @@ class PlayerCard(QWidget):
             for key, _t in self.TRACK_ORDER
             if tracks.get(key) and os.path.isfile(tracks[key])
         }
-        self._refresh_buttons()
+        self._clear_loop()
+        self._set_song_name(os.path.basename(self._folder).replace("_", " "))
+        self._rebuild_track_buttons()
+        if not self._tracks:
+            # Release the file so a re-run can overwrite it.
+            self._player.setSource(QUrl())
+            return
+        if self._current_key not in self._tracks:
+            self._current_key = next(iter(self._tracks))
+        self._select_track(self._current_key)
+
+    def _set_song_name(self, name: str):
+        fm = QFontMetrics(self.songLabel.font())
+        self.songLabel.setText(fm.elidedText(name, Qt.ElideMiddle, 280))
+        self.songLabel.setToolTip(name)
 
     def _load_chords(self, lrc_path):
         raw = parse_lrc(lrc_path) if lrc_path and os.path.isfile(lrc_path) else []
@@ -113,7 +184,7 @@ class PlayerCard(QWidget):
             if key not in self._tracks:
                 continue
             btn = QPushButton(get_text(self.lang, tkey))
-            btn.setObjectName("trackBtn")
+            btn.setObjectName("chip")
             btn.setCheckable(True)
             btn.clicked.connect(lambda _checked=False, k=key: self._select_track(k))
             self._track_group.addButton(btn)
@@ -121,205 +192,192 @@ class PlayerCard(QWidget):
             self._track_buttons[key] = btn
             idx += 1
 
-    def _refresh_buttons(self):
-        self._rebuild_track_buttons()
-        has_any = bool(self._tracks)
-        self.setVisible(has_any)
-        if not has_any:
-            return
-        # Keep the current selection if still valid; otherwise pick the first.
-        if self._current_key not in self._tracks:
-            self._current_key = next(iter(self._tracks))
-        self._select_track(self._current_key)
-
     def retranslate(self, lang: str):
         self.lang = lang
-        self.titleLabel.setText("🎧  " + get_text(lang, "section_player"))
+        t = lambda k: get_text(lang, k)
+        align_to_language(lang, self.songLabel)
+        self.titleLabel.setText(t("section_player"))
         for key, tkey in self.TRACK_ORDER:
             btn = self._track_buttons.get(key)
             if btn:
-                btn.setText(get_text(lang, tkey))
-        self.chordCaption.setText("🎼  " + get_text(lang, "chord_now"))
-        self.tempoLabel.setText(get_text(lang, "tempo"))
-        self.volumeLabel.setText(get_text(lang, "volume"))
-        self.openFolderBtn.setText("📂  " + get_text(lang, "open_folder"))
-        direction = Qt.RightToLeft if lang == "he" else Qt.LeftToRight
-        self.setLayoutDirection(direction)
+                btn.setText(t(tkey))
+        self.tempoLabel.setText(t("tempo"))
+        self.openFolderBtn.setText(t("open_folder"))
+        self.logBtn.setText(t("show_log"))
+        self.setABtn.setToolTip(t("loop_set_a"))
+        self.setBBtn.setToolTip(t("loop_set_b"))
+        self.clearLoopBtn.setToolTip(t("loop_clear"))
+        self.tempoValue.setToolTip(t("tempo_reset"))
 
     # ── UI ────────────────────────────────────────────────────────────────
     def _build_ui(self):
-        self.setProperty("class", "card")
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         root = QVBoxLayout(self)
-        root.setContentsMargins(22, 18, 22, 22)
+        root.setContentsMargins(20, 16, 20, 18)
         root.setSpacing(12)
 
         # Title row
+        title_row = QHBoxLayout()
+        title_row.setSpacing(4)
+        title_col = QVBoxLayout()
+        title_col.setSpacing(0)
         self.titleLabel = QLabel()
-        self.titleLabel.setObjectName("cardTitle")
-        root.addWidget(self.titleLabel)
+        self.titleLabel.setObjectName("paneTitle")
+        self.songLabel = QLabel()
+        self.songLabel.setObjectName("paneSubtitle")
+        title_col.addWidget(self.titleLabel)
+        title_col.addWidget(self.songLabel)
+        self.logBtn = QPushButton()
+        self.logBtn.setObjectName("ghost")
+        self.logBtn.setIcon(icon("log", COLORS["text_dim"]))
+        self.logBtn.clicked.connect(self.show_log_requested.emit)
+        self.openFolderBtn = QPushButton()
+        self.openFolderBtn.setObjectName("ghost")
+        self.openFolderBtn.setIcon(icon("folder", COLORS["text_dim"]))
+        self.openFolderBtn.clicked.connect(self._open_folder)
+        title_row.addLayout(title_col, 1)
+        title_row.addWidget(self.logBtn, 0, Qt.AlignTop)
+        title_row.addWidget(self.openFolderBtn, 0, Qt.AlignTop)
+        root.addLayout(title_row)
 
-        # Current-chord display (only visible when a chord chart was produced)
+        # Track switcher — dynamic grid.
+        self._track_group = QButtonGroup(self)
+        self._track_group.setExclusive(True)
+        self._tracks_grid = QGridLayout()
+        self._tracks_grid.setSpacing(6)
+        root.addLayout(self._tracks_grid)
+
+        root.addStretch(1)
+
+        # Current chord (only visible when a chord chart was produced)
         self.chordRow = QWidget()
         chord_layout = QHBoxLayout(self.chordRow)
         chord_layout.setContentsMargins(0, 0, 0, 0)
-        chord_layout.setSpacing(10)
-        self.chordCaption = QLabel()
-        self.chordCaption.setObjectName("sectionLabel")
+        chord_layout.setSpacing(14)
         self.chordValue = QLabel("—")
         self.chordValue.setObjectName("chordValue")
-        self.chordValue.setStyleSheet("font-size: 30px; font-weight: 700;")
         self.chordNext = QLabel("")
-        self.chordNext.setObjectName("timeLabel")
-        chord_layout.addWidget(self.chordCaption)
+        self.chordNext.setObjectName("chordNext")
+        chord_layout.addStretch(1)
         chord_layout.addWidget(self.chordValue)
-        chord_layout.addStretch()
         chord_layout.addWidget(self.chordNext)
+        chord_layout.addStretch(1)
         root.addWidget(self.chordRow)
         self.chordRow.setVisible(False)
 
-        # Track switcher — dynamic grid of track buttons + open-folder button.
-        self._track_group = QButtonGroup(self)
-        self._track_group.setExclusive(True)
+        root.addStretch(1)
 
-        switch_row = QHBoxLayout()
-        switch_row.setSpacing(8)
-        self._tracks_grid = QGridLayout()
-        self._tracks_grid.setHorizontalSpacing(8)
-        self._tracks_grid.setVerticalSpacing(6)
-        switch_row.addLayout(self._tracks_grid)
-        switch_row.addStretch()
-
-        self.openFolderBtn = QPushButton()
-        self.openFolderBtn.setObjectName("smallButton")
-        self.openFolderBtn.clicked.connect(self._open_folder)
-        switch_row.addWidget(self.openFolderBtn, 0, Qt.AlignTop)
-        root.addLayout(switch_row)
-
-        # Transport: play button + time labels + seek
-        transport = QHBoxLayout()
-        transport.setSpacing(14)
-
-        self.playBtn = QPushButton("▶")
-        self.playBtn.setObjectName("playBtn")
-        self.playBtn.clicked.connect(self._toggle_play)
-        transport.addWidget(self.playBtn)
-
-        # Seek column
-        seek_col = QVBoxLayout()
-        seek_col.setSpacing(4)
+        # Media controls read left-to-right in every language.
+        transport = QWidget()
+        transport.setLayoutDirection(Qt.LeftToRight)
+        tcol = QVBoxLayout(transport)
+        tcol.setContentsMargins(0, 0, 0, 0)
+        tcol.setSpacing(10)
+        root.addWidget(transport)
 
         seek_row = QHBoxLayout()
-        seek_row.setSpacing(10)
+        seek_row.setSpacing(8)
         self.timeCurLabel = QLabel("0:00")
         self.timeCurLabel.setObjectName("timeLabel")
-        self.seekSlider = QSlider(Qt.Horizontal)
+        self.seekSlider = _SeekSlider()
         self.seekSlider.setRange(0, 0)
         self.seekSlider.sliderPressed.connect(lambda: setattr(self, "_user_seeking", True))
         self.seekSlider.sliderReleased.connect(self._on_seek_release)
         self.seekSlider.sliderMoved.connect(self._on_seek_move)
         self.timeTotalLabel = QLabel("0:00")
         self.timeTotalLabel.setObjectName("timeLabel")
-        self.timeTotalLabel.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
         seek_row.addWidget(self.timeCurLabel)
         seek_row.addWidget(self.seekSlider, 1)
         seek_row.addWidget(self.timeTotalLabel)
-        seek_col.addLayout(seek_row)
+        tcol.addLayout(seek_row)
 
-        # Loop controls
-        loop_row = QHBoxLayout()
-        loop_row.setSpacing(8)
-        self.loopALabel = QLabel("A: —")
-        self.loopALabel.setObjectName("timeLabel")
-        self.loopBLabel = QLabel("B: —")
-        self.loopBLabel.setObjectName("timeLabel")
-        self.setABtn = QPushButton("Set A")
-        self.setBBtn = QPushButton("Set B")
-        self.clearLoopBtn = QPushButton("Clear loop")
-        for b in (self.setABtn, self.setBBtn, self.clearLoopBtn):
-            b.setObjectName("smallButton")
+        controls = QHBoxLayout()
+        controls.setSpacing(6)
+
+        self.playBtn = QPushButton()
+        self.playBtn.setObjectName("playBtn")
+        self._play_icon = icon("play", COLORS["on_accent"])
+        self._pause_icon = icon("pause", COLORS["on_accent"])
+        self.playBtn.setIcon(self._play_icon)
+        self.playBtn.clicked.connect(self._toggle_play)
+        controls.addWidget(self.playBtn)
+        controls.addSpacing(8)
+
+        self.setABtn = QPushButton("A")
+        self.setBBtn = QPushButton("B")
+        for btn in (self.setABtn, self.setBBtn):
+            btn.setObjectName("chip")
+            btn.setCheckable(True)
+            btn.setMinimumWidth(62)
+            controls.addWidget(btn)
         self.setABtn.clicked.connect(self._set_loop_a)
         self.setBBtn.clicked.connect(self._set_loop_b)
+        self.clearLoopBtn = QPushButton()
+        self.clearLoopBtn.setObjectName("iconOnly")
+        self.clearLoopBtn.setIcon(icon("close", COLORS["text_mute"]))
         self.clearLoopBtn.clicked.connect(self._clear_loop)
+        controls.addWidget(self.clearLoopBtn)
+        controls.addStretch(1)
 
-        loop_row.addWidget(QLabel("🔁"))
-        loop_row.addWidget(self.loopALabel)
-        loop_row.addWidget(self.setABtn)
-        loop_row.addWidget(self.loopBLabel)
-        loop_row.addWidget(self.setBBtn)
-        loop_row.addWidget(self.clearLoopBtn)
-        loop_row.addStretch()
-        seek_col.addLayout(loop_row)
+        volume_icon = QLabel()
+        volume_icon.setPixmap(icon("volume", COLORS["text_mute"]).pixmap(16, 16))
+        self.volumeSlider = QSlider(Qt.Horizontal)
+        self.volumeSlider.setRange(0, 100)
+        self.volumeSlider.setValue(85)
+        self.volumeSlider.setFixedWidth(84)
+        self.volumeSlider.valueChanged.connect(lambda v: self._audio_out.setVolume(v / 100.0))
+        controls.addWidget(volume_icon)
+        controls.addWidget(self.volumeSlider)
+        tcol.addLayout(controls)
 
-        transport.addLayout(seek_col, 1)
-        root.addLayout(transport)
-
-        # Tempo + Volume
-        knobs = QHBoxLayout()
-        knobs.setSpacing(20)
-
-        tempo_col = QVBoxLayout()
-        tempo_col.setSpacing(4)
-        tempo_top = QHBoxLayout()
+        tempo_row = QHBoxLayout()
+        tempo_row.setSpacing(8)
         self.tempoLabel = QLabel()
         self.tempoLabel.setObjectName("sectionLabel")
-        self.tempoValue = QLabel("1.00×")
-        self.tempoValue.setObjectName("tempoValue")
-        self.tempoValue.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        tempo_top.addWidget(self.tempoLabel)
-        tempo_top.addStretch()
-        tempo_top.addWidget(self.tempoValue)
         self.tempoSlider = QSlider(Qt.Horizontal)
         self.tempoSlider.setRange(self.TEMPO_MIN, self.TEMPO_MAX)
         self.tempoSlider.setValue(100)
         self.tempoSlider.valueChanged.connect(self._on_tempo_changed)
-        tempo_col.addLayout(tempo_top)
-        tempo_col.addWidget(self.tempoSlider)
-        knobs.addLayout(tempo_col, 1)
-
-        vol_col = QVBoxLayout()
-        vol_col.setSpacing(4)
-        self.volumeLabel = QLabel()
-        self.volumeLabel.setObjectName("sectionLabel")
-        self.volumeSlider = QSlider(Qt.Horizontal)
-        self.volumeSlider.setRange(0, 100)
-        self.volumeSlider.setValue(85)
-        self.volumeSlider.valueChanged.connect(lambda v: self._audio_out.setVolume(v / 100.0))
-        vol_col.addWidget(self.volumeLabel)
-        vol_col.addWidget(self.volumeSlider)
-        knobs.addLayout(vol_col, 1)
-
-        root.addLayout(knobs)
+        self.tempoValue = QPushButton("1.00×")
+        self.tempoValue.setObjectName("tempoValue")
+        self.tempoValue.clicked.connect(lambda: self.tempoSlider.setValue(100))
+        tempo_row.addWidget(self.tempoLabel)
+        tempo_row.addWidget(self.tempoSlider, 1)
+        tempo_row.addWidget(self.tempoValue)
+        tcol.addLayout(tempo_row)
 
     # ── Player wiring ─────────────────────────────────────────────────────
     def _wire_player(self):
         self._player.durationChanged.connect(self._on_duration_changed)
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.playbackStateChanged.connect(self._on_state_changed)
+        self._player.mediaStatusChanged.connect(self._on_media_status)
 
     def _select_track(self, key: str):
         path = self._tracks.get(key)
         if not path:
             return
-        resume = self._player.playbackState() == QMediaPlayer.PlayingState
-        pos = self._player.position()
+        playing = self._player.playbackState() == QMediaPlayer.PlayingState
+        position = self._player.position()
 
         self._current_key = key
-        self._player.stop()
+        self._player.stop()   # reports LoadedMedia for the old file, so arm after it
+        self._pending = (position, playing)
         self._player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
 
         for k, btn in self._track_buttons.items():
-            selected = k == key
-            btn.setProperty("selected", "true" if selected else "false")
-            btn.style().unpolish(btn); btn.style().polish(btn)
-            btn.setChecked(selected)
+            btn.setChecked(k == key)
 
+    def _on_media_status(self, status):
         # All tracks derive from the same (trimmed) source, so they share a
-        # duration — preserving the play-head across switches stays in sync.
-        if pos > 0:
-            self._player.setPosition(pos)
-        if resume:
+        # duration. The source loads asynchronously, and a seek issued before it
+        # finishes is dropped, so the play-head is restored here.
+        if status != QMediaPlayer.LoadedMedia or self._pending is None:
+            return
+        position, playing = self._pending
+        self._pending = None
+        if position > 0:
+            self._player.setPosition(position)
+        if playing:
             self._player.play()
 
     def _toggle_play(self):
@@ -331,7 +389,8 @@ class PlayerCard(QWidget):
             self._player.play()
 
     def _on_state_changed(self, state):
-        self.playBtn.setText("⏸" if state == QMediaPlayer.PlayingState else "▶")
+        playing = state == QMediaPlayer.PlayingState
+        self.playBtn.setIcon(self._pause_icon if playing else self._play_icon)
 
     def _on_duration_changed(self, ms: int):
         self.seekSlider.setRange(0, ms)
@@ -340,8 +399,8 @@ class PlayerCard(QWidget):
     def _on_position_changed(self, ms: int):
         if not self._user_seeking:
             self.seekSlider.setValue(ms)
-        self.timeCurLabel.setText(_fmt_ms(ms))
-        self._update_chord_label(ms)
+            self.timeCurLabel.setText(_fmt_ms(ms))
+            self._update_chord_label(ms)
 
     def _update_chord_label(self, ms: int):
         if not self._chords:
@@ -356,7 +415,7 @@ class PlayerCard(QWidget):
             else:
                 break
         self.chordValue.setText(cur)
-        self.chordNext.setText("→  " + "   ".join(nexts) if nexts else "")
+        self.chordNext.setText("   ".join(nexts))
 
     def _on_seek_move(self, v: int):
         self.timeCurLabel.setText(_fmt_ms(v))
@@ -369,27 +428,26 @@ class PlayerCard(QWidget):
     # ── Loop ──────────────────────────────────────────────────────────────
     def _set_loop_a(self):
         self._loop_a_ms = self._player.position()
-        self.loopALabel.setText(f"A: {_fmt_ms(self._loop_a_ms)}")
         self._update_loop_state()
 
     def _set_loop_b(self):
         self._loop_b_ms = self._player.position()
-        self.loopBLabel.setText(f"B: {_fmt_ms(self._loop_b_ms)}")
         self._update_loop_state()
 
     def _clear_loop(self):
         self._loop_a_ms = None
         self._loop_b_ms = None
-        self.loopALabel.setText("A: —")
-        self.loopBLabel.setText("B: —")
         self._update_loop_state()
 
     def _update_loop_state(self):
-        if (
-            self._loop_a_ms is not None
-            and self._loop_b_ms is not None
-            and self._loop_b_ms > self._loop_a_ms
-        ):
+        a, b = self._loop_a_ms, self._loop_b_ms
+        self.setABtn.setText(f"A  {_fmt_ms(a)}" if a is not None else "A")
+        self.setBBtn.setText(f"B  {_fmt_ms(b)}" if b is not None else "B")
+        self.setABtn.setChecked(a is not None)
+        self.setBBtn.setChecked(b is not None)
+        self.clearLoopBtn.setVisible(a is not None or b is not None)
+        self.seekSlider.set_loop(a, b)
+        if a is not None and b is not None and b > a:
             self._loop_timer.start()
         else:
             self._loop_timer.stop()

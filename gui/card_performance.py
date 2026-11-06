@@ -1,20 +1,25 @@
 """
-Card 1 — input + settings + GO button.
-Cleaner layout: Source / Output / Time Range / Solo Time / Go.
+Setup pane: source, tracks, extras, format, destination, Extract.
+
+Designed to be read top to bottom with nothing to scroll. Optional inputs (Trim,
+Solo) stay hidden until their chip is on, and long explanations live in tooltips.
+A single line above Extract says what the app is waiting for.
 """
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QFileDialog, QRadioButton, QButtonGroup,
-    QFrame, QMessageBox, QCheckBox,
+    QButtonGroup, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from gui.icons import align_to_language, icon
+from gui.styles import COLORS
 from pipeline.uvr import (
     is_available as uvr_available,
     model_present,
@@ -25,339 +30,374 @@ from utils.helpers import is_valid_youtube_url
 from utils.time_range import _parse_clock
 from utils.translations import get_text
 
-
-class _DropLineEdit(QLineEdit):
-    """LineEdit that accepts drag-dropped URLs / local files."""
-    file_dropped = Signal(str)
-    url_dropped = Signal(str)
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.setAcceptDrops(True)
-
-    def dragEnterEvent(self, ev: QDragEnterEvent):
-        if ev.mimeData().hasUrls() or ev.mimeData().hasText():
-            ev.acceptProposedAction()
-        else:
-            super().dragEnterEvent(ev)
-
-    def dropEvent(self, ev: QDropEvent):
-        mime = ev.mimeData()
-        if mime.hasUrls() and mime.urls():
-            url = mime.urls()[0]
-            if url.isLocalFile():
-                self.setText(url.toLocalFile())
-                self.file_dropped.emit(url.toLocalFile())
-            else:
-                self.setText(url.toString())
-                self.url_dropped.emit(url.toString())
-        elif mime.hasText():
-            self.setText(mime.text().strip())
-            if self.text().startswith("http"):
-                self.url_dropped.emit(self.text())
-        ev.acceptProposedAction()
+_SOLO_COLUMNS = 2
+_SOLO_VISIBLE_ROWS = 2
+_SOLO_ROW_HEIGHT = 32
+_SOLO_ROW_GAP = 6
 
 
-class PerformanceCard(QWidget):
+def _tip(text: str) -> str:
+    """Rich text, because Qt only word-wraps tooltips that are rich text."""
+    return f"<qt>{text}</qt>"
+
+
+class _PathButton(QPushButton):
+    """Shows a folder's name, elided to fit; the full path is in the tooltip."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._path = ""
+
+    def set_path(self, path: str):
+        self._path = path
+        self.setToolTip(path)
+        self._refresh()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._refresh()
+
+    def _refresh(self):
+        name = Path(self._path).name or self._path
+        available = max(40, self.width() - self.iconSize().width() - 36)
+        self.setText(QFontMetrics(self.font()).elidedText(name, Qt.ElideMiddle, available))
+
+
+class PerformanceCard(QFrame):
     go_clicked = Signal(dict)
-    repeat_last = Signal()
-    input_changed = Signal()
+    height_changed = Signal()   # an optional row opened, closed, or grew
 
     FORMATS = ("wav", "mp3", "m4a", "webm", "opus")
     # The six stems htdemucs_6s produces, in display order.
     STEM_KEYS = ("guitar", "drums", "bass", "vocals", "piano", "other")
+    TRACK_CHIPS = ("guitar", "backing", "drums", "bass", "vocals", "piano", "other")
+    TRACK_COLUMNS = 4
 
     def __init__(self, lang: str = "en", settings: dict | None = None, parent=None):
         super().__init__(parent)
+        self.setObjectName("pane")
         self.lang = lang
         self.settings = settings or {}
         self._selected_format = self.settings.get("format", "wav")
-        self._export_video = bool(self.settings.get("export_video", False))
-        self._detect_chords = bool(self.settings.get("detect_chords", False))
-        self._remove_reverb = bool(self.settings.get("remove_reverb", False))
-        self._remove_crowd = bool(self.settings.get("remove_crowd", False))
-        saved_stems = self.settings.get("export_stems", ["guitar"])
-        self._saved_stems = set(saved_stems if isinstance(saved_stems, list) else ["guitar"])
-        self._export_backing = bool(self.settings.get("export_backing", True))
+        self._error = ""
         self._solo_segments: list[dict] = []
+        self._processing = False
         self._build_ui()
         self.retranslate(lang)
-        self._apply_direction()
 
     # ── UI ────────────────────────────────────────────────────────────────
     def _build_ui(self):
-        self.setProperty("class", "card")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 22)
-        layout.setSpacing(14)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 16)
+        root.setSpacing(10)
 
-        # Title
-        self.titleLabel = QLabel()
-        self.titleLabel.setObjectName("cardTitle")
-        layout.addWidget(self.titleLabel)
+        self.form = QWidget()
+        form = QVBoxLayout(self.form)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(12)
+        root.addWidget(self.form)
+        root.addStretch(1)
 
-        # ── Source ────────────────────────────────────────
-        self.sourceLabel = self._section_label()
-        layout.addWidget(self.sourceLabel)
+        form.addLayout(self._build_source())
+        form.addLayout(self._build_tracks())
+        form.addLayout(self._build_extras())
+        form.addWidget(self._build_trim())
+        form.addWidget(self._build_solo())
+        form.addLayout(self._build_output())
 
-        toggle_row = QHBoxLayout()
-        toggle_row.setSpacing(20)
-        self._input_group = QButtonGroup(self)
-        self.radioYT = QRadioButton()
-        self.radioPC = QRadioButton()
-        last_type = self.settings.get("last_input_type", "youtube")
-        self.radioYT.setChecked(last_type == "youtube")
-        self.radioPC.setChecked(last_type == "file")
-        self._input_group.addButton(self.radioYT, 0)
-        self._input_group.addButton(self.radioPC, 1)
-        toggle_row.addWidget(self.radioYT)
-        toggle_row.addWidget(self.radioPC)
-        toggle_row.addStretch()
-        layout.addLayout(toggle_row)
+        self.hintLabel = QLabel()
+        self.hintLabel.setObjectName("hint")
+        self.hintLabel.setFixedHeight(18)
+        root.addWidget(self.hintLabel)
 
-        self.urlEdit = _DropLineEdit()
-        self.urlEdit.setText(self.settings.get("last_input", "") if last_type == "youtube" else "")
-        self.urlEdit.textChanged.connect(self._on_input_changed)
-        self.urlEdit.url_dropped.connect(lambda _: self._on_input_changed())
-        layout.addWidget(self.urlEdit)
+        self.goBtn = QPushButton()
+        self.goBtn.setObjectName("goButton")
+        self.goBtn.setEnabled(False)
+        self.goBtn.clicked.connect(self._on_go)
+        root.addWidget(self.goBtn)
 
-        file_row = QHBoxLayout()
-        file_row.setSpacing(8)
-        self.fileEdit = _DropLineEdit()
-        self.fileEdit.setText(self.settings.get("last_input", "") if last_type == "file" else "")
-        self.fileEdit.textChanged.connect(self._on_input_changed)
-        self.fileEdit.file_dropped.connect(lambda _: self._on_input_changed())
+        self._refresh_uvr_availability()
+
+    def _section(self, parent_layout: QVBoxLayout) -> QLabel:
+        label = QLabel()
+        label.setObjectName("sectionLabel")
+        parent_layout.addWidget(label)
+        return label
+
+    def _chip(self, checked: bool = False) -> QPushButton:
+        chip = QPushButton()
+        chip.setObjectName("chip")
+        chip.setCheckable(True)
+        chip.setChecked(checked)
+        return chip
+
+    def _build_source(self) -> QVBoxLayout:
+        col = QVBoxLayout()
+        col.setSpacing(5)
+        self.sourceLabel = self._section(col)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.sourceEdit = QLineEdit(self.settings.get("last_input", ""))
+        # Drops are handled by the window, so they land anywhere, not just here.
+        self.sourceEdit.setAcceptDrops(False)
+        self.sourceEdit.textChanged.connect(self._on_input_changed)
+        self.sourceEdit.returnPressed.connect(self._on_go)
         self.filePickBtn = QPushButton()
+        self.filePickBtn.setIcon(icon("file", COLORS["text_dim"]))
         self.filePickBtn.clicked.connect(self._browse_file)
-        file_row.addWidget(self.fileEdit, 1)
-        file_row.addWidget(self.filePickBtn)
-        layout.addLayout(file_row)
+        row.addWidget(self.sourceEdit, 1)
+        row.addWidget(self.filePickBtn)
+        col.addLayout(row)
+        return col
 
-        # ── Export folder ─────────────────────────────────
-        self.folderLabel = self._section_label()
-        layout.addWidget(self.folderLabel)
-        folder_row = QHBoxLayout()
-        folder_row.setSpacing(8)
-        self.folderEdit = QLineEdit()
-        self.folderEdit.setText(self.settings.get(
-            "export_folder",
-            str(Path.home() / "Desktop" / "Backing Tracks"),
-        ))
-        self.folderEdit.setReadOnly(True)
-        self.browseBtn = QPushButton()
-        self.browseBtn.clicked.connect(self._browse_folder)
-        folder_row.addWidget(self.folderEdit, 1)
-        folder_row.addWidget(self.browseBtn)
-        layout.addLayout(folder_row)
+    def _build_tracks(self) -> QVBoxLayout:
+        col = QVBoxLayout()
+        col.setSpacing(5)
+        self.tracksLabel = self._section(col)
 
-        # ── Time range ────────────────────────────────────
-        self.timeLabel = self._section_label()
-        layout.addWidget(self.timeLabel)
-        self.timeHint = QLabel()
-        self.timeHint.setObjectName("hint")
-        layout.addWidget(self.timeHint)
-        time_row = QHBoxLayout()
-        time_row.setSpacing(8)
-        self.timeStartEdit = QLineEdit()
-        self.timeStartEdit.setText(self.settings.get("last_time_range_start", ""))
-        self.timeEndEdit = QLineEdit()
-        self.timeEndEdit.setText(self.settings.get("last_time_range_end", ""))
-        dash = QLabel("—")
-        dash.setAlignment(Qt.AlignCenter)
-        time_row.addWidget(self.timeStartEdit, 1)
-        time_row.addWidget(dash)
-        time_row.addWidget(self.timeEndEdit, 1)
-        layout.addLayout(time_row)
+        saved = self.settings.get("export_stems", ["guitar"])
+        saved = set(saved if isinstance(saved, list) else ["guitar"])
+        backing = bool(self.settings.get("export_backing", True))
 
-        # ── Output format ─────────────────────────────────
-        self.outputLabel = self._section_label()
-        layout.addWidget(self.outputLabel)
-        fmt_row = QHBoxLayout()
-        fmt_row.setSpacing(6)
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        self._stem_checks: dict[str, QPushButton] = {}
+        for i, key in enumerate(self.TRACK_CHIPS):
+            chip = self._chip(backing if key == "backing" else key in saved)
+            chip.toggled.connect(self._on_input_changed)
+            self._stem_checks[key] = chip
+            grid.addWidget(chip, i // self.TRACK_COLUMNS, i % self.TRACK_COLUMNS)
+        col.addLayout(grid)
+        return col
+
+    def _build_extras(self) -> QVBoxLayout:
+        col = QVBoxLayout()
+        col.setSpacing(5)
+        self.extrasLabel = self._section(col)
+
+        s = self.settings
+        self.videoChip = self._chip(bool(s.get("export_video", False)))
+        self.chordsChip = self._chip(bool(s.get("detect_chords", False)))
+        self.reverbChip = self._chip(bool(s.get("remove_reverb", False)))
+        self.crowdChip = self._chip(bool(s.get("remove_crowd", False)))
+        has_trim = bool(s.get("last_time_range_start") or s.get("last_time_range_end"))
+        self.trimChip = self._chip(has_trim)
+        self.soloChip = self._chip(False)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        for chip in (
+            self.videoChip, self.chordsChip, self.reverbChip,
+            self.crowdChip, self.trimChip, self.soloChip,
+        ):
+            row.addWidget(chip)
+        col.addLayout(row)
+
+        self.trimChip.toggled.connect(self._toggle_trim)
+        self.soloChip.toggled.connect(self._toggle_solo)
+        return col
+
+    def _build_trim(self) -> QFrame:
+        self.trimRow = QFrame()
+        self.trimRow.setObjectName("inset")
+        row = QHBoxLayout(self.trimRow)
+        row.setContentsMargins(10, 5, 8, 5)
+        row.setSpacing(6)
+        self.trimLabel = QLabel()
+        self.trimLabel.setObjectName("sectionLabel")
+        self.timeStartEdit = self._time_edit(self.settings.get("last_time_range_start", ""))
+        self.timeEndEdit = self._time_edit(self.settings.get("last_time_range_end", ""))
+        self.timeStartEdit.textChanged.connect(self._on_input_changed)
+        self.timeEndEdit.textChanged.connect(self._on_input_changed)
+        row.addWidget(self.trimLabel)
+        row.addStretch(1)
+        row.addWidget(self.timeStartEdit)
+        row.addWidget(QLabel("–"))
+        row.addWidget(self.timeEndEdit)
+        self.trimRow.setVisible(self.trimChip.isChecked())
+        return self.trimRow
+
+    def _build_solo(self) -> QFrame:
+        self.soloRow = QFrame()
+        self.soloRow.setObjectName("inset")
+        col = QVBoxLayout(self.soloRow)
+        col.setContentsMargins(10, 4, 8, 6)
+        col.setSpacing(4)
+
+        top = QHBoxLayout()
+        self.soloLabel = QLabel()
+        self.soloLabel.setObjectName("sectionLabel")
+        self.addSegmentBtn = QPushButton()
+        self.addSegmentBtn.setObjectName("ghost")
+        self.addSegmentBtn.setIcon(icon("plus", COLORS["text_dim"]))
+        self.addSegmentBtn.clicked.connect(self._add_solo_segment)
+        top.addWidget(self.soloLabel)
+        top.addStretch(1)
+        top.addWidget(self.addSegmentBtn)
+        col.addLayout(top)
+
+        rows = QWidget()
+        rows.setObjectName("soloRows")
+        self._solo_grid = QGridLayout(rows)
+        self._solo_grid.setContentsMargins(0, 0, 0, 0)
+        self._solo_grid.setSpacing(_SOLO_ROW_GAP)
+        self._solo_grid.setAlignment(Qt.AlignTop)
+        self.soloScroll = QScrollArea()
+        self.soloScroll.setObjectName("soloScroll")
+        self.soloScroll.setWidgetResizable(True)
+        self.soloScroll.setFrameShape(QFrame.NoFrame)
+        self.soloScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.soloScroll.setWidget(rows)
+        col.addWidget(self.soloScroll)
+
+        self.soloRow.setVisible(False)
+        return self.soloRow
+
+    def _build_output(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(10)
+
+        fmt_col = QVBoxLayout()
+        fmt_col.setSpacing(5)
+        self.outputLabel = self._section(fmt_col)
+        segmented = QFrame()
+        segmented.setObjectName("segmented")
+        seg_row = QHBoxLayout(segmented)
+        seg_row.setContentsMargins(2, 2, 2, 2)
+        seg_row.setSpacing(0)
+        self._format_group = QButtonGroup(self)
         self._format_buttons: dict[str, QPushButton] = {}
         for fmt in self.FORMATS:
             btn = QPushButton(fmt.upper())
-            btn.setObjectName("formatButton")
+            btn.setObjectName("segment")
             btn.setCheckable(True)
+            btn.setChecked(fmt == self._selected_format)
             btn.clicked.connect(lambda _=False, f=fmt: self._select_format(f))
+            self._format_group.addButton(btn)
             self._format_buttons[fmt] = btn
-            fmt_row.addWidget(btn)
-        fmt_row.addStretch()
-        layout.addLayout(fmt_row)
-        self._select_format(self._selected_format)
+            seg_row.addWidget(btn)
+        fmt_col.addWidget(segmented)
+        row.addLayout(fmt_col)
 
-        # ── Tracks to export ──────────────────────────────
-        self.tracksLabel = self._section_label()
-        layout.addWidget(self.tracksLabel)
-        self.tracksHint = QLabel()
-        self.tracksHint.setObjectName("hint")
-        self.tracksHint.setWordWrap(True)
-        layout.addWidget(self.tracksHint)
+        folder_col = QVBoxLayout()
+        folder_col.setSpacing(5)
+        self.folderLabel = self._section(folder_col)
+        self.folderBtn = _PathButton()
+        self.folderBtn.setIcon(icon("folder", COLORS["text_dim"]))
+        self.folderBtn.clicked.connect(self._browse_folder)
+        self._export_folder = self.settings.get(
+            "export_folder", str(Path.home() / "Desktop" / "Backing Tracks"),
+        )
+        self.folderBtn.set_path(self._export_folder)
+        folder_col.addWidget(self.folderBtn)
+        row.addLayout(folder_col, 1)
+        return row
 
-        from PySide6.QtWidgets import QGridLayout
-        tracks_grid = QGridLayout()
-        tracks_grid.setHorizontalSpacing(18)
-        tracks_grid.setVerticalSpacing(6)
-        self._stem_checks: dict[str, QCheckBox] = {}
-        # 6 stems + the backing mix, laid out 4 per row.
-        cells = list(self.STEM_KEYS) + ["backing"]
-        for i, key in enumerate(cells):
-            cb = QCheckBox()
-            if key == "backing":
-                cb.setChecked(self._export_backing)
-            else:
-                cb.setChecked(key in self._saved_stems)
-            cb.toggled.connect(self._on_input_changed)
-            self._stem_checks[key] = cb
-            tracks_grid.addWidget(cb, i // 4, i % 4)
-        layout.addLayout(tracks_grid)
-
-        # ── Play-along video ──────────────────────────────
-        self.exportVideoCheckbox = QCheckBox()
-        self.exportVideoCheckbox.setChecked(self._export_video)
-        layout.addWidget(self.exportVideoCheckbox)
-        self.exportVideoHint = QLabel()
-        self.exportVideoHint.setObjectName("hint")
-        self.exportVideoHint.setWordWrap(True)
-        layout.addWidget(self.exportVideoHint)
-
-        # ── Chord detection ───────────────────────────────
-        self.detectChordsCheckbox = QCheckBox()
-        self.detectChordsCheckbox.setChecked(self._detect_chords)
-        layout.addWidget(self.detectChordsCheckbox)
-        self.detectChordsHint = QLabel()
-        self.detectChordsHint.setObjectName("hint")
-        self.detectChordsHint.setWordWrap(True)
-        layout.addWidget(self.detectChordsHint)
-
-        # ── Cleanup options (UVR) ─────────────────────────
-        self.cleanupLabel = self._section_label()
-        layout.addWidget(self.cleanupLabel)
-
-        self.removeReverbCheckbox = QCheckBox()
-        self.removeReverbCheckbox.setChecked(self._remove_reverb)
-        self.removeCrowdCheckbox = QCheckBox()
-        self.removeCrowdCheckbox.setChecked(self._remove_crowd)
-        layout.addWidget(self.removeReverbCheckbox)
-        layout.addWidget(self.removeCrowdCheckbox)
-
-        self.uvrHint = QLabel()
-        self.uvrHint.setObjectName("hint")
-        self.uvrHint.setWordWrap(True)
-        layout.addWidget(self.uvrHint)
-        self._refresh_uvr_availability()
-
-        # ── Solo Time ─────────────────────────────────────
-        self.soloCheckbox = QCheckBox()
-        layout.addWidget(self.soloCheckbox)
-
-        self.soloContainer = QFrame()
-        self.soloContainer.setObjectName("soloContainer")
-        solo_layout = QVBoxLayout(self.soloContainer)
-        solo_layout.setContentsMargins(14, 12, 14, 12)
-        solo_layout.setSpacing(8)
-        self.soloTitleLabel = QLabel()
-        self.soloTitleLabel.setObjectName("soloTitle")
-        solo_layout.addWidget(self.soloTitleLabel)
-        self.soloSegmentsLayout = QVBoxLayout()
-        self.soloSegmentsLayout.setSpacing(6)
-        solo_layout.addLayout(self.soloSegmentsLayout)
-        self.addSegmentBtn = QPushButton()
-        self.addSegmentBtn.setObjectName("smallButton")
-        self.addSegmentBtn.clicked.connect(self._add_solo_segment)
-        solo_layout.addWidget(self.addSegmentBtn, 0, Qt.AlignLeft)
-        layout.addWidget(self.soloContainer)
-        self.soloContainer.setVisible(False)
-        self.soloCheckbox.toggled.connect(self._toggle_solo_time)
-
-        # ── Divider ───────────────────────────────────────
-        div = QFrame()
-        div.setObjectName("divider")
-        div.setFrameShape(QFrame.HLine)
-        layout.addWidget(div)
-
-        # ── Go row ────────────────────────────────────────
-        go_row = QHBoxLayout()
-        go_row.setSpacing(12)
-        self.repeatBtn = QPushButton("🔁")
-        self.repeatBtn.setObjectName("iconButton")
-        self.repeatBtn.setToolTip(get_text(self.lang, "repeat_last"))
-        self.repeatBtn.clicked.connect(self.repeat_last.emit)
-        go_row.addWidget(self.repeatBtn)
-        go_row.addStretch()
-        self.goBtn = QPushButton()
-        self.goBtn.setObjectName("goButton")
-        self.goBtn.clicked.connect(self._on_go)
-        self.goBtn.setEnabled(False)
-        go_row.addWidget(self.goBtn)
-        go_row.addStretch()
-        layout.addLayout(go_row)
-
-        self._toggle_input_mode()
-        self.radioYT.toggled.connect(self._toggle_input_mode)
-
-    def _section_label(self) -> QLabel:
-        lbl = QLabel()
-        lbl.setObjectName("sectionLabel")
-        return lbl
+    @staticmethod
+    def _time_edit(text: str = "", width: int = 66) -> QLineEdit:
+        edit = QLineEdit(text)
+        edit.setObjectName("timeEdit")
+        edit.setFixedWidth(width)
+        edit.setAlignment(Qt.AlignCenter)
+        edit.setLayoutDirection(Qt.LeftToRight)
+        return edit
 
     # ── Behaviour ────────────────────────────────────────────────────────
-    def _toggle_input_mode(self):
-        is_yt = self.radioYT.isChecked()
-        self.urlEdit.setVisible(is_yt)
-        self.fileEdit.setVisible(not is_yt)
-        self.filePickBtn.setVisible(not is_yt)
-        self._on_input_changed()
+    def _source(self) -> tuple[str | None, str]:
+        """(kind, value), where kind is 'youtube', 'file', or None if unusable."""
+        # Explorer's "Copy as path" wraps the path in double quotes.
+        value = self.sourceEdit.text().strip().strip('"')
+        if is_valid_youtube_url(value):
+            return "youtube", value
+        if value and os.path.isfile(value):
+            return "file", value
+        return None, value
 
     def _browse_folder(self):
-        current = self.folderEdit.text() or str(Path.home() / "Desktop")
-        folder = QFileDialog.getExistingDirectory(self, get_text(self.lang, "export_folder"), current)
+        current = self._export_folder or str(Path.home() / "Desktop")
+        folder = QFileDialog.getExistingDirectory(
+            self, get_text(self.lang, "export_folder"), current,
+        )
         if folder:
-            self.folderEdit.setText(folder)
+            self._export_folder = folder
+            self.folderBtn.set_path(folder)
 
     def _browse_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, get_text(self.lang, "upload_pc"), str(Path.home()),
-            "Audio Files (*.wav *.mp3 *.m4a *.webm *.opus *.flac *.ogg);;All Files (*)",
+            self, get_text(self.lang, "browse"), str(Path.home()),
+            "Audio / Video (*.wav *.mp3 *.m4a *.webm *.opus *.flac *.ogg "
+            "*.mp4 *.mkv *.mov *.avi *.m4v);;All Files (*)",
         )
         if path:
-            self.fileEdit.setText(path)
-            self._on_input_changed()
+            self.set_source(path)
+
+    def set_source(self, value: str):
+        self.sourceEdit.setText(value)
+
+    def set_drag_active(self, active: bool):
+        self.sourceEdit.setProperty("dragActive", "true" if active else "false")
+        self.sourceEdit.style().unpolish(self.sourceEdit)
+        self.sourceEdit.style().polish(self.sourceEdit)
 
     def _select_format(self, fmt: str):
         self._selected_format = fmt
-        for f, btn in self._format_buttons.items():
-            btn.setProperty("selected", "true" if f == fmt else "false")
-            btn.setChecked(f == fmt)
-            btn.style().unpolish(btn); btn.style().polish(btn)
 
-    def _on_input_changed(self):
-        self.goBtn.setEnabled(self._validate_input())
-        self.input_changed.emit()
+    def _has_output(self) -> bool:
+        return (
+            any(chip.isChecked() for chip in self._stem_checks.values())
+            or self.soloChip.isChecked()
+        )
 
-    def _validate_input(self) -> bool:
-        if self.radioYT.isChecked():
-            return is_valid_youtube_url(self.urlEdit.text().strip())
-        path = self.fileEdit.text().strip()
-        return bool(path) and os.path.isfile(path)
+    def _on_input_changed(self, *_):
+        self._error = ""
+        self._refresh_hint()
+
+    def _set_hint(self, text: str, state: str = ""):
+        fm = QFontMetrics(self.hintLabel.font())
+        width = max(200, self.width() - 32)
+        self.hintLabel.setText(fm.elidedText(text, Qt.ElideMiddle, width))
+        self.hintLabel.setProperty("state", state)
+        self.hintLabel.style().unpolish(self.hintLabel)
+        self.hintLabel.style().polish(self.hintLabel)
+
+    def _refresh_hint(self):
+        """Show what Extract is waiting for, and enable it only when ready."""
+        t = lambda k, **kw: get_text(self.lang, k, **kw)
+        kind, value = self._source()
+        ready = False
+        if not value:
+            self._set_hint(t("hint_need_source"))
+        elif kind is None:
+            self._set_hint(t("hint_bad_source"), "err")
+        elif not self._has_output():
+            self._set_hint(t("error_no_tracks"), "warn")
+        else:
+            ready = True
+            if self._error:
+                self._set_hint(self._error, "err")
+            elif kind == "youtube":
+                self._set_hint(t("hint_ready_youtube"), "ok")
+            else:
+                self._set_hint(Path(value).name, "ok")
+        if not self._processing:
+            self.goBtn.setEnabled(ready)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._refresh_hint()
+
+    def _fail(self, message: str):
+        self._error = message
+        self._refresh_hint()
 
     def _on_go(self):
-        if not self._validate_input():
-            return
-
-        export_stems = [k for k in self.STEM_KEYS if self._stem_checks[k].isChecked()]
-        export_backing = self._stem_checks["backing"].isChecked()
-        solo_on = self.soloCheckbox.isChecked()
-        if not export_stems and not export_backing and not solo_on:
-            QMessageBox.warning(
-                self, get_text(self.lang, "section_tracks"),
-                get_text(self.lang, "error_no_tracks"),
-            )
+        kind, value = self._source()
+        if kind is None or not self._has_output() or self._processing:
             return
 
         time_range = None
-        start_raw = self.timeStartEdit.text().strip()
-        end_raw = self.timeEndEdit.text().strip()
+        start_raw, end_raw = self.get_time_range_raw()
         if start_raw or end_raw:
             try:
                 start = _parse_clock(start_raw) if start_raw else 0.0
@@ -366,170 +406,174 @@ class PerformanceCard(QWidget):
                     raise ValueError("End must be after start")
                 time_range = (start, end)
             except ValueError as e:
-                QMessageBox.warning(
-                    self, get_text(self.lang, "section_time"),
-                    get_text(self.lang, "error_invalid_time", msg=str(e)),
-                )
+                self._fail(get_text(self.lang, "error_invalid_time", msg=str(e)))
                 return
 
+        solo_on = self.soloChip.isChecked()
         solo_segments = []
-        if self.soloCheckbox.isChecked():
+        if solo_on:
             for seg in self._solo_segments:
                 s = seg["start"].text().strip()
                 e = seg["end"].text().strip()
                 if not s and not e:
                     continue
                 try:
-                    a = _parse_clock(s); b = _parse_clock(e)
+                    a = _parse_clock(s)
+                    b = _parse_clock(e)
                     if b <= a:
                         raise ValueError("End must be after start")
                     solo_segments.append((a, b))
                 except ValueError as err:
-                    QMessageBox.warning(
-                        self, get_text(self.lang, "section_solo"),
-                        get_text(self.lang, "error_invalid_time", msg=str(err)),
-                    )
+                    self._fail(get_text(self.lang, "error_invalid_time", msg=str(err)))
                     return
 
         self.go_clicked.emit({
-            "export_folder": self.folderEdit.text().strip(),
-            "input_type": "youtube" if self.radioYT.isChecked() else "file",
-            "input_value": (
-                self.urlEdit.text().strip() if self.radioYT.isChecked()
-                else self.fileEdit.text().strip()
-            ),
+            "export_folder": self._export_folder.strip(),
+            "input_type": kind,
+            "input_value": value,
             "format": self._selected_format,
-            "export_stems": export_stems,
-            "export_backing": export_backing,
-            "export_video": self.exportVideoCheckbox.isChecked(),
-            "detect_chords": self.detectChordsCheckbox.isChecked(),
+            "export_stems": [k for k in self.STEM_KEYS if self._stem_checks[k].isChecked()],
+            "export_backing": self._stem_checks["backing"].isChecked(),
+            "export_video": self.videoChip.isChecked(),
+            "detect_chords": self.chordsChip.isChecked(),
             "clean_temp": True,
             "time_range": time_range,
-            "solo_time_enabled": self.soloCheckbox.isChecked(),
+            "solo_time_enabled": solo_on,
             "solo_time_segments": solo_segments,
-            "remove_reverb": self.removeReverbCheckbox.isChecked(),
-            "remove_crowd": self.removeCrowdCheckbox.isChecked(),
+            "remove_reverb": self.reverbChip.isChecked(),
+            "remove_crowd": self.crowdChip.isChecked(),
         })
 
-    # ── Solo segments ────────────────────────────────────────────────────
-    def _toggle_solo_time(self, enabled: bool):
-        self.soloContainer.setVisible(enabled)
+    # ── Optional rows ────────────────────────────────────────────────────
+    def _toggle_trim(self, enabled: bool):
+        self.trimRow.setVisible(enabled)
+        self._on_input_changed()
+        self.height_changed.emit()
+
+    def _toggle_solo(self, enabled: bool):
+        self.soloRow.setVisible(enabled)
         if enabled and not self._solo_segments:
             self._add_solo_segment()
         self._on_input_changed()
+        self.height_changed.emit()
 
     def _add_solo_segment(self):
         seg_widget = QWidget()
+        seg_widget.setLayoutDirection(Qt.LeftToRight)
         seg_layout = QHBoxLayout(seg_widget)
         seg_layout.setContentsMargins(0, 0, 0, 0)
-        seg_layout.setSpacing(6)
+        seg_layout.setSpacing(4)
 
-        start_edit = QLineEdit(); start_edit.setPlaceholderText("1:50"); start_edit.setFixedWidth(80)
-        arrow = QLabel("→"); arrow.setAlignment(Qt.AlignCenter)
-        end_edit = QLineEdit(); end_edit.setPlaceholderText("3:00"); end_edit.setFixedWidth(80)
-        rm_btn = QPushButton("✕"); rm_btn.setObjectName("smallButton"); rm_btn.setFixedWidth(30)
-
+        start_edit = self._time_edit(width=58)
+        start_edit.setPlaceholderText("1:50")
+        end_edit = self._time_edit(width=58)
+        end_edit.setPlaceholderText("3:00")
+        remove = QPushButton()
+        remove.setObjectName("iconOnly")
+        remove.setIcon(icon("close", COLORS["text_mute"]))
         seg_layout.addWidget(start_edit)
-        seg_layout.addWidget(arrow)
+        seg_layout.addWidget(QLabel("–"))
         seg_layout.addWidget(end_edit)
-        seg_layout.addWidget(rm_btn)
-        seg_layout.addStretch()
+        seg_layout.addWidget(remove)
+        seg_layout.addStretch(1)
 
-        self.soloSegmentsLayout.addWidget(seg_widget)
         seg_data = {"widget": seg_widget, "start": start_edit, "end": end_edit}
         self._solo_segments.append(seg_data)
-        rm_btn.clicked.connect(lambda: self._remove_solo_segment(seg_data))
+        remove.clicked.connect(lambda: self._remove_solo_segment(seg_data))
         start_edit.textChanged.connect(self._on_input_changed)
         end_edit.textChanged.connect(self._on_input_changed)
+        self._layout_solo_segments()
+        start_edit.setFocus()
 
     def _remove_solo_segment(self, seg_data: dict):
-        seg_data["widget"].setParent(None)
         self._solo_segments.remove(seg_data)
+        seg_data["widget"].setParent(None)
+        seg_data["widget"].deleteLater()
+        self._layout_solo_segments()
         self._on_input_changed()
+
+    def _layout_solo_segments(self):
+        for i, seg in enumerate(self._solo_segments):
+            self._solo_grid.addWidget(
+                seg["widget"], i // _SOLO_COLUMNS, i % _SOLO_COLUMNS,
+            )
+        rows = math.ceil(len(self._solo_segments) / _SOLO_COLUMNS)
+        visible = max(1, min(rows, _SOLO_VISIBLE_ROWS))
+        self.soloScroll.setFixedHeight(
+            visible * _SOLO_ROW_HEIGHT + (visible - 1) * _SOLO_ROW_GAP,
+        )
+        self.height_changed.emit()
 
     # ── Public API ───────────────────────────────────────────────────────
     def set_processing(self, processing: bool):
-        self.goBtn.setEnabled(not processing)
-        self.goBtn.setText(
-            get_text(self.lang, "go_button_processing") if processing
-            else get_text(self.lang, "go_button")
-        )
-        for w in (
-            self.browseBtn, self.filePickBtn, self.radioYT, self.radioPC,
-            self.urlEdit, self.fileEdit, self.timeStartEdit, self.timeEndEdit,
-            self.soloCheckbox, self.addSegmentBtn, self.repeatBtn,
-            self.removeReverbCheckbox, self.removeCrowdCheckbox,
-            self.exportVideoCheckbox, self.detectChordsCheckbox,
-            *self._format_buttons.values(),
-            *self._stem_checks.values(),
-        ):
-            w.setEnabled(not processing)
-        if not processing:
-            self._on_input_changed()
+        self._processing = processing
+        self.form.setEnabled(not processing)
+        self.goBtn.setText(get_text(
+            self.lang, "go_button_processing" if processing else "go_button",
+        ))
+        if processing:
+            self.goBtn.setEnabled(False)
+        else:
+            self._refresh_hint()
 
     def retranslate(self, lang: str):
         self.lang = lang
         t = lambda k, **kw: get_text(lang, k, **kw)
 
-        self.titleLabel.setText("⚙️  " + t("section_input"))
         self.sourceLabel.setText(t("section_input"))
-        self.radioYT.setText(t("youtube_link"))
-        self.radioPC.setText(t("upload_pc"))
-        self.urlEdit.setPlaceholderText(t("url_placeholder"))
-        self.fileEdit.setPlaceholderText(t("upload_placeholder"))
-        self.filePickBtn.setText("📂  " + t("browse"))
-        self.browseBtn.setText("📁  " + t("browse"))
-        self.folderLabel.setText(t("export_folder"))
-        self.timeLabel.setText(t("section_time"))
-        self.timeHint.setText(t("time_range_hint"))
+        self.sourceEdit.setPlaceholderText(t("source_placeholder"))
+        self.filePickBtn.setText(t("browse"))
+
+        self.tracksLabel.setText(t("section_tracks"))
+        for key, chip in self._stem_checks.items():
+            chip.setText(t(f"track_{key}"))
+            chip.setToolTip(_tip(t("tracks_hint")))
+        self._stem_checks["backing"].setToolTip(_tip(t("tip_backing")))
+
+        self.extrasLabel.setText(t("section_extras"))
+        self.videoChip.setText(t("chip_video"))
+        self.videoChip.setToolTip(_tip(f"<b>{t('export_video')}</b><br>{t('export_video_hint')}"))
+        self.chordsChip.setText(t("chip_chords"))
+        self.chordsChip.setToolTip(_tip(f"<b>{t('detect_chords')}</b><br>{t('detect_chords_hint')}"))
+        self.reverbChip.setText(t("chip_reverb"))
+        self.crowdChip.setText(t("chip_crowd"))
+        self.trimChip.setText(t("chip_trim"))
+        self.trimChip.setToolTip(_tip(f"<b>{t('section_time')}</b><br>{t('time_range_hint')}"))
+        self.soloChip.setText(t("chip_solo"))
+        self.soloChip.setToolTip(_tip(t("enable_solo_time")))
+        self._refresh_uvr_availability()
+
+        self.trimLabel.setText(t("section_time"))
         self.timeStartEdit.setPlaceholderText(t("time_start"))
         self.timeEndEdit.setPlaceholderText(t("time_end"))
-        self.outputLabel.setText(t("output_format"))
-        self.tracksLabel.setText(t("section_tracks"))
-        self.tracksHint.setText(t("tracks_hint"))
-        for key, cb in self._stem_checks.items():
-            cb.setText(t("track_backing") if key == "backing" else t(f"track_{key}"))
-        self.exportVideoCheckbox.setText("🎬  " + t("export_video"))
-        self.exportVideoHint.setText(t("export_video_hint"))
-        self.detectChordsCheckbox.setText("🎼  " + t("detect_chords"))
-        self.detectChordsHint.setText(t("detect_chords_hint"))
-        self.cleanupLabel.setText(t("section_cleanup"))
-        self.removeReverbCheckbox.setText("💧  " + t("remove_reverb"))
-        self.removeCrowdCheckbox.setText("👥  " + t("remove_crowd"))
-        self._refresh_uvr_availability()
-        self.soloCheckbox.setText("🎸  " + t("enable_solo_time"))
-        self.soloTitleLabel.setText(t("solo_title"))
+        self.soloLabel.setText(t("solo_title"))
         self.addSegmentBtn.setText(t("add_segment"))
-        self.repeatBtn.setToolTip(t("repeat_last"))
-        self.goBtn.setText("🎸  " + t("go_button"))
-        self._apply_direction()
 
-    def _apply_direction(self):
-        self.setLayoutDirection(Qt.RightToLeft if self.lang == "he" else Qt.LeftToRight)
+        self.outputLabel.setText(t("output_format"))
+        self.folderLabel.setText(t("export_folder"))
+        self.goBtn.setText(t("go_button_processing" if self._processing else "go_button"))
+        align_to_language(lang, self.hintLabel)
+        self._refresh_hint()
 
-    def get_export_folder(self) -> str:
-        return self.folderEdit.text().strip()
+    def options_open(self) -> bool:
+        return self.trimChip.isChecked() or self.soloChip.isChecked()
 
     def get_time_range_raw(self) -> tuple[str, str]:
+        if not self.trimChip.isChecked():
+            return "", ""
         return self.timeStartEdit.text().strip(), self.timeEndEdit.text().strip()
 
     # ── UVR availability ────────────────────────────────────────────────
     def _refresh_uvr_availability(self):
         t = lambda k: get_text(self.lang, k)
-        problems: list[str] = []
-        if not uvr_available():
-            problems.append(t("uvr_pkg_missing"))
-            self.removeReverbCheckbox.setEnabled(False)
-            self.removeCrowdCheckbox.setEnabled(False)
-        else:
-            if not model_present(DEREVERB_MODEL):
-                problems.append(t("uvr_dereverb_missing"))
-                self.removeReverbCheckbox.setEnabled(False)
-            else:
-                self.removeReverbCheckbox.setEnabled(True)
-            if not model_present(CROWD_MODEL):
-                problems.append(t("uvr_crowd_missing"))
-                self.removeCrowdCheckbox.setEnabled(False)
-            else:
-                self.removeCrowdCheckbox.setEnabled(True)
-        self.uvrHint.setText("  •  ".join(problems) if problems else t("uvr_hint_ok"))
+        installed = uvr_available()
+        for chip, model, title, missing in (
+            (self.reverbChip, DEREVERB_MODEL, "remove_reverb", "uvr_dereverb_missing"),
+            (self.crowdChip, CROWD_MODEL, "remove_crowd", "uvr_crowd_missing"),
+        ):
+            usable = installed and model_present(model)
+            chip.setEnabled(usable)
+            if not usable:
+                chip.setChecked(False)
+            note = t("uvr_hint_ok") if usable else t("uvr_pkg_missing" if not installed else missing)
+            chip.setToolTip(_tip(f"<b>{t(title)}</b><br>{note}"))
