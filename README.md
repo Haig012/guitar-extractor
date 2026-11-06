@@ -1,4 +1,6 @@
-# 🎸 Guitar Extractor
+<img src="gui/assets/logo.png" width="96" alt="Guitar Extractor logo">
+
+# Guitar Extractor
 
 **Made by Hai Guriel**
 
@@ -41,6 +43,7 @@ a solo down and pick it apart, and a **live chord display** that shows the curre
 - 📁 **Per-song output folders** — each song gets its own subfolder under the export root
 - 🚀 GPU acceleration auto-detected (CUDA)
 - 🌍 English / Hebrew UI with RTL layout switching
+- 🧲 **Drop anywhere** — drop a file or link on the window; it works out whether it's YouTube or local
 - ⌨️ Keyboard shortcuts — `Space` play/pause, `Ctrl+Enter` start extract, `Esc` cancel
 
 ![Player and progress after extraction](docs/screenshots/02_player_and_progress.png)
